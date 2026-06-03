@@ -1,0 +1,23 @@
+seed: 0
+output_dir: ./runs/smoke
+llm:
+  provider: heuristic
+env:
+  backend: mock
+  kwargs:
+    max_steps: 5
+agent:
+  memory_size: 8
+  action_hint: "Use one of: look, pick apple, put apple in basket."
+library:
+  path: ./runs/smoke/library.json
+  k_skills: 3
+  k_insights: 3
+  retrieval_similarity_threshold: 0.0
+  similarity_merge_threshold: 0.86
+  sample: true
+eval:
+  split: test
+  limit: 3
+  max_steps: 5
+  library_update_uses_env_reward: false

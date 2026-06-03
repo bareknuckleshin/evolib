@@ -1,0 +1,30 @@
+seed: 0
+output_dir: ./runs/original_alfworld_evolib
+llm:
+  provider: openai_compatible
+  model: gpt-4o-mini
+  temperature: 0.0
+  max_tokens: 512
+env:
+  backend: original_alfworld
+  kwargs:
+    # Leave null to let alfworld.agents.modules.generic.load_config() use configs/base_config.yaml from argv/defaults.
+    config_path: null
+    train_eval: eval_out_of_distribution
+    batch_size: 1
+    max_steps: 50
+agent:
+  memory_size: 20
+  action_hint: "Use one exact admissible ALFWorld command. Prefer admissible commands shown by the environment."
+library:
+  path: ./runs/original_alfworld_evolib/library.json
+  k_skills: 5
+  k_insights: 5
+  retrieval_similarity_threshold: 0.05
+  similarity_merge_threshold: 0.88
+  sample: true
+eval:
+  split: test
+  limit: 134
+  max_steps: 50
+  library_update_uses_env_reward: false

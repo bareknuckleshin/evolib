@@ -1,0 +1,32 @@
+seed: 0
+output_dir: ./runs/original_webshop_evolib
+llm:
+  provider: openai_compatible
+  model: gpt-4o-mini
+  temperature: 0.0
+  max_tokens: 512
+env:
+  backend: original_webshop
+  kwargs:
+    num_products: 1000       # start with small WebShop setup; use full data after editing WebShop utils.py
+    observation_mode: text
+    human_goals: 0
+    show_attrs: false
+    max_steps: 15
+agent:
+  memory_size: 12
+  action_hint: "Use search[query] or click[value]. For visible options/buttons/products, use click[exact visible text]."
+library:
+  path: ./runs/original_webshop_evolib/library.json
+  k_skills: 4
+  k_insights: 4
+  retrieval_similarity_threshold: 0.05
+  similarity_merge_threshold: 0.88
+  sample: true
+eval:
+  split: test
+  limit: 50
+  max_steps: 15
+  # false = closest to EvoLib paper's no-external-feedback setting.
+  # true = reward-aware variant using WebShop reward for library updates.
+  library_update_uses_env_reward: false

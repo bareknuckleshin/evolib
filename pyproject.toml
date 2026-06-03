@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evolib-agent-suite"
+version = "0.1.0"
+description = "EvoLib-style test-time learning agents for AgentBoard, WebShop, and ALFWorld."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy>=1.23",
+  "pydantic>=2.0",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+webshop = ["gym>=0.25"]
+alfworld = ["alfworld>=0.3"]
+http = ["requests>=2.31"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evolib_agent_suite*"]
