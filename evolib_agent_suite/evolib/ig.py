@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
 from evolib_agent_suite.utils import clamp
+from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, rng_for_context
 
 
 @dataclass
@@ -14,6 +15,8 @@ class IGConfig:
     min_samples: int = 1
     bootstrap_samples: int = 0
     per_domain_baseline: bool = False
+    bootstrap_sampling_strategy: str = "uniform"
+    bootstrap_seed: int = 0
 
 
 class BaselineEstimator:
@@ -41,13 +44,18 @@ class BaselineEstimator:
         if strategy == "global_ema":
             return float(self.stats.get("score_ema", 0.0))
         if strategy == "global_mean":
+            history = self._score_history()
+            if self.config.bootstrap_samples > 0 and history:
+                sample = self._bootstrap_sample(history, context)
+                return sum(sample) / len(sample)
             return float(self.stats.get("score_mean", 0.0))
         if strategy == "rolling_window":
             history = self._score_history()
             if not history:
                 return float(self.stats.get("score_ema", 0.0))
             window = history[-max(1, int(self.config.window_size)) :]
-            return sum(window) / len(window)
+            sample = self._bootstrap_sample(window, context)
+            return sum(sample) / len(sample)
         if strategy == "domain_ema":
             domain = str(context.get("domain") or "generic")
             domain_stat = self.stats.get("domain_stats", {}).get(domain)
@@ -122,6 +130,22 @@ class BaselineEstimator:
     def _score_history(self) -> List[float]:
         history = self.stats.setdefault("score_history", [])
         return [float(x) for x in history]
+
+    def _bootstrap_sample(self, history: List[float], context: Optional[Dict[str, Any]]) -> List[float]:
+        if not history:
+            return [float(self.stats.get("score_ema", 0.0))]
+        sample_count = int(self.config.bootstrap_samples)
+        if sample_count <= 0:
+            return history
+        context = context or {}
+        sampling_config = SamplingConfig(
+            strategy=self.config.bootstrap_sampling_strategy,
+            seed=int(self.config.bootstrap_seed),
+            without_replacement=False,
+        )
+        rng, trace = rng_for_context(sampling_config, context.get("task_id"), "baseline_bootstrap")
+        self.stats["last_baseline_sampling"] = trace.to_dict()
+        return SamplingPolicy(sampling_config).sample(history, [1.0] * len(history), sample_count, rng)
 
     def _ema(self, old: float, new: float) -> float:
         return self.config.ema_decay * float(old) + (1.0 - self.config.ema_decay) * float(new)

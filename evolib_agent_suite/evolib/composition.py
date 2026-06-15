@@ -6,7 +6,7 @@ from itertools import combinations
 from typing import Any, Dict, List, Optional, Sequence
 
 from evolib_agent_suite.evolib.library import LibraryEntry
-from evolib_agent_suite.utils import weighted_sample_without_replacement
+from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, rng_for_context
 
 
 @dataclass
@@ -20,6 +20,12 @@ class CompositionConfig:
     include_singletons: bool = True
     include_mixed: bool = True
     score_policy: str = "sum_weight"
+    sampling_strategy: str = "weighted"
+    temperature: float = 1.0
+    top_p: float = 0.9
+    epsilon: float = 0.1
+    seed: int = 0
+    without_replacement: bool = True
 
 
 @dataclass
@@ -112,15 +118,28 @@ def _weighted_sampled_bundle(
     cfg: CompositionConfig,
     rng: random.Random,
 ) -> CandidateSolution:
-    sampled_skills = weighted_sample_without_replacement(
-        list(skills), [max(entry.weight, 1e-6) for entry in skills], cfg.max_skills_per_candidate, rng
+    sampling_config = SamplingConfig(
+        strategy=cfg.sampling_strategy,
+        temperature=cfg.temperature,
+        top_p=cfg.top_p,
+        epsilon=cfg.epsilon,
+        seed=cfg.seed,
+        without_replacement=cfg.without_replacement,
+    )
+    policy = SamplingPolicy(sampling_config)
+    skill_rng, skill_trace = rng_for_context(sampling_config, "composition", "skills")
+    sampled_skills = policy.sample(
+        list(skills), [max(entry.weight, 1e-6) for entry in skills], cfg.max_skills_per_candidate, skill_rng or rng
     )
     sampled_insights: List[LibraryEntry] = []
+    insight_trace = None
     if cfg.include_mixed:
-        sampled_insights = weighted_sample_without_replacement(
-            list(insights), [max(entry.weight, 1e-6) for entry in insights], cfg.max_insights_per_candidate, rng
+        insight_rng, insight_trace = rng_for_context(sampling_config, "composition", "insights")
+        sampled_insights = policy.sample(
+            list(insights), [max(entry.weight, 1e-6) for entry in insights], cfg.max_insights_per_candidate, insight_rng or rng
         )
-    return _candidate("weighted_sampled_bundle", sampled_skills + sampled_insights, cfg, index=0)
+    metadata = {"sampling": {"skills": skill_trace.to_dict(), "insights": insight_trace.to_dict() if insight_trace else None}}
+    return _candidate("weighted_sampled_bundle", sampled_skills + sampled_insights, cfg, index=0, metadata=metadata)
 
 
 def _candidate(

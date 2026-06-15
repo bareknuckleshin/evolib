@@ -80,6 +80,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         epsilon=float(library_cfg.get("epsilon", 0.1)),
         weight_alpha=float(library_cfg.get("weight_alpha", 1.0)),
         similarity_alpha=float(library_cfg.get("similarity_alpha", 1.0)),
+        top_p=float(library_cfg.get("top_p", 0.9)),
+        seed=int(config.get("seed", 0)),
+        without_replacement=_as_bool(library_cfg.get("without_replacement", True)),
     )
 
     metrics: Dict[str, Any] = {
@@ -97,6 +100,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         reset = env.reset(task)
         if reset.goal:
             task.goal = reset.goal
+        retrieval_config.context_id = task.task_id
         retrieved = library.retrieve_with_metadata(
             query=f"{task.domain}\n{task.goal}\n{reset.observation}",
             config=retrieval_config,
@@ -185,6 +189,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
                     "retrieval_weight": item.retrieval_weight,
                     "rank": item.rank,
                     "selected_by": item.selected_by,
+                    "sampling_seed": item.sampling_seed,
+                    "sampling_base_seed": item.sampling_base_seed,
+                    "sampling_context_id": item.sampling_context_id,
                 }
                 for item in retrieved
             ],
@@ -262,6 +269,12 @@ def _composition_config(data: Dict[str, Any]) -> CompositionConfig:
         include_singletons=_as_bool(data.get("include_singletons", True)),
         include_mixed=_as_bool(data.get("include_mixed", True)),
         score_policy=data.get("score_policy", "sum_weight"),
+        sampling_strategy=data.get("sampling_strategy", "weighted"),
+        temperature=float(data.get("temperature", 1.0)),
+        top_p=float(data.get("top_p", 0.9)),
+        epsilon=float(data.get("epsilon", 0.1)),
+        seed=int(data.get("seed", 0)),
+        without_replacement=_as_bool(data.get("without_replacement", True)),
     )
 
 
