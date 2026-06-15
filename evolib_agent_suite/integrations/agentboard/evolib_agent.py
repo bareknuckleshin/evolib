@@ -16,6 +16,12 @@ Then set AgentBoard config:
       k_insights: 4
       retrieval_similarity_threshold: 0.05
       similarity_merge_threshold: 0.88
+      sampling_strategy: weighted
+      candidate_pool_multiplier: 4
+      temperature: 1.0
+      epsilon: 0.1
+      weight_alpha: 1.0
+      similarity_alpha: 1.0
 """
 from __future__ import annotations
 
@@ -32,7 +38,7 @@ from agents.base_agent import BaseAgent  # type: ignore
 from common.registry import registry  # type: ignore
 
 from evolib_agent_suite.agents import EvoLibReActAgent
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
+from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, RetrievalConfig
 from evolib_agent_suite.llm.base import BaseLLM
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 
@@ -63,6 +69,12 @@ class EvoLibAgent(BaseAgent):
         k_insights: int = 4,
         retrieval_similarity_threshold: float = 0.05,
         similarity_merge_threshold: float = 0.88,
+        sampling_strategy: str = "weighted",
+        candidate_pool_multiplier: int = 4,
+        temperature: float = 1.0,
+        epsilon: float = 0.1,
+        weight_alpha: float = 1.0,
+        similarity_alpha: float = 1.0,
         action_hint: str = "Use one exact executable action accepted by the environment.",
         init_prompt_path: Optional[str] = None,
         instruction: str = "",
@@ -91,6 +103,17 @@ class EvoLibAgent(BaseAgent):
         self.need_goal = need_goal
         self.k_skills = k_skills
         self.k_insights = k_insights
+        self.retrieval_config = RetrievalConfig(
+            k_skills=k_skills,
+            k_insights=k_insights,
+            similarity_threshold=retrieval_similarity_threshold,
+            candidate_pool_multiplier=candidate_pool_multiplier,
+            sampling_strategy=sampling_strategy,
+            temperature=temperature,
+            epsilon=epsilon,
+            weight_alpha=weight_alpha,
+            similarity_alpha=similarity_alpha,
+        )
         self.action_hint = action_hint
         self.instruction = instruction
         self.examples = examples or []
@@ -118,7 +141,13 @@ class EvoLibAgent(BaseAgent):
             query=f"agentboard\n{goal}\n{init_obs}",
             k_skills=self.k_skills,
             k_insights=self.k_insights,
-            sample=True,
+            sampling_strategy=self.retrieval_config.sampling_strategy,
+            similarity_threshold=self.retrieval_config.similarity_threshold,
+            candidate_pool_multiplier=self.retrieval_config.candidate_pool_multiplier,
+            temperature=self.retrieval_config.temperature,
+            epsilon=self.retrieval_config.epsilon,
+            weight_alpha=self.retrieval_config.weight_alpha,
+            similarity_alpha=self.retrieval_config.similarity_alpha,
         )
         self.core.reset(task, entries)
         self.current_task = task
@@ -195,6 +224,12 @@ class EvoLibAgent(BaseAgent):
             k_insights=config.get("k_insights", 4),
             retrieval_similarity_threshold=config.get("retrieval_similarity_threshold", 0.05),
             similarity_merge_threshold=config.get("similarity_merge_threshold", 0.88),
+            sampling_strategy=config.get("sampling_strategy", "weighted" if config.get("sample", True) else "topk"),
+            candidate_pool_multiplier=config.get("candidate_pool_multiplier", 4),
+            temperature=config.get("temperature", 1.0),
+            epsilon=config.get("epsilon", 0.1),
+            weight_alpha=config.get("weight_alpha", 1.0),
+            similarity_alpha=config.get("similarity_alpha", 1.0),
             action_hint=config.get("action_hint", "Use one exact executable action accepted by the environment."),
             init_prompt_path=config.get("init_prompt_path"),
             instruction=config.get("instruction", ""),

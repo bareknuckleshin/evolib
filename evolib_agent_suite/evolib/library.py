@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from evolib_agent_suite.evolib.consolidation import ConsolidationConfig, ConsolidationPolicy, LLMMerger
 from evolib_agent_suite.utils import clamp, cosine, hashed_embedding, weighted_sample_without_replacement
+from evolib_agent_suite.evolib.ig import BaselineEstimator, IGConfig
 
 
 @dataclass
@@ -44,6 +47,28 @@ class LibraryEntry:
         return cls(**data)
 
 
+@dataclass
+class RetrievalConfig:
+    k_skills: int = 4
+    k_insights: int = 4
+    similarity_threshold: float = 0.05
+    candidate_pool_multiplier: int = 4
+    sampling_strategy: str = "weighted"
+    temperature: float = 1.0
+    epsilon: float = 0.1
+    weight_alpha: float = 1.0
+    similarity_alpha: float = 1.0
+
+
+@dataclass
+class RetrievedEntry:
+    entry: LibraryEntry
+    similarity: float
+    retrieval_weight: float
+    rank: int
+    selected_by: str
+
+
 class EvolvingLibrary:
     """Persistent EvoLib-style library.
 
@@ -66,6 +91,9 @@ class EvolvingLibrary:
         alpha_ig: float = 1.0,
         beta_future_ig: float = 0.7,
         ema_decay: float = 0.85,
+        consolidation_config: Optional[ConsolidationConfig] = None,
+        llm: Any = None,
+        ig_config: Optional[Union[IGConfig, Dict[str, Any]]] = None,
     ) -> None:
         self.path = Path(path)
         self.similarity_merge_threshold = similarity_merge_threshold
@@ -73,10 +101,25 @@ class EvolvingLibrary:
         self.alpha_ig = alpha_ig
         self.beta_future_ig = beta_future_ig
         self.ema_decay = ema_decay
+        if isinstance(ig_config, IGConfig):
+            self.ig_config = ig_config
+        else:
+            ig_data = dict(ig_config or {})
+            ig_data.setdefault("ema_decay", ema_decay)
+            self.ig_config = IGConfig(**ig_data)
         self.rng = random.Random(seed)
+        if consolidation_config is None:
+            consolidation_config = ConsolidationConfig(
+                similarity_threshold=similarity_merge_threshold,
+                ema_decay=ema_decay,
+            )
+        self.consolidation_config = consolidation_config
+        merger = LLMMerger(llm) if llm is not None and consolidation_config.merge_strategy == "llm_merge" else None
+        self.consolidation_policy = ConsolidationPolicy(consolidation_config, llm_merger=merger)
         self.entries: Dict[str, LibraryEntry] = {}
         self.stats: Dict[str, Any] = {"episodes": 0, "score_ema": 0.0, "score_sum": 0.0}
         self.load()
+        self.baseline_estimator = BaselineEstimator(self.stats, self.ig_config)
 
     def load(self) -> None:
         if not self.path.exists():
@@ -132,14 +175,7 @@ class EvolvingLibrary:
         )
 
     def _find_merge_target(self, candidate: LibraryEntry) -> Optional[Tuple[LibraryEntry, float]]:
-        best: Optional[Tuple[LibraryEntry, float]] = None
-        for entry in self.entries.values():
-            if entry.type != candidate.type:
-                continue
-            sim = cosine(candidate.embedding, entry.embedding)
-            if sim >= self.similarity_merge_threshold and (best is None or sim > best[1]):
-                best = (entry, sim)
-        return best
+        return self.consolidation_policy.find_target(list(self.entries.values()), candidate)
 
     def add_or_merge_many(
         self,
@@ -147,26 +183,25 @@ class EvolvingLibrary:
         parents: Sequence[str],
         task_id: str,
         score: float,
+        task_context: str = "",
     ) -> List[str]:
         new_or_updated: List[str] = []
         for item in candidates:
             candidate = self._make_entry(item, parents=parents, task_id=task_id, score=score)
             if not candidate.content:
                 continue
-            target = self._find_merge_target(candidate)
+            target = self.consolidation_policy.find_target(list(self.entries.values()), candidate)
             if target is not None:
                 entry, sim = target
-                entry.updated_at = time.time()
-                entry.source_task_ids = list(dict.fromkeys(entry.source_task_ids + [task_id]))
-                entry.parents = list(dict.fromkeys(entry.parents + list(parents)))
-                entry.tags = list(dict.fromkeys(entry.tags + candidate.tags))
-                # Keep the more general/longer wording, but avoid unbounded growth.
-                if len(candidate.content) > len(entry.content) and len(candidate.content) < 1200:
-                    entry.content = candidate.content
-                    entry.title = candidate.title or entry.title
-                    entry.embedding = hashed_embedding(entry.text)
-                entry.score_ema = self._ema(entry.score_ema, score)
-                entry.metadata["last_merge_similarity"] = sim
+                self.consolidation_policy.merge(
+                    entry,
+                    candidate,
+                    similarity=sim,
+                    task_id=task_id,
+                    score=score,
+                    parents=parents,
+                    task_context=task_context,
+                )
                 new_or_updated.append(entry.id)
             else:
                 self.entries[candidate.id] = candidate
@@ -183,31 +218,102 @@ class EvolvingLibrary:
         k_skills: int = 4,
         k_insights: int = 4,
         sample: bool = True,
+        sampling_strategy: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+        candidate_pool_multiplier: int = 4,
+        temperature: float = 1.0,
+        epsilon: float = 0.1,
+        weight_alpha: float = 1.0,
+        similarity_alpha: float = 1.0,
     ) -> List[LibraryEntry]:
+        config = RetrievalConfig(
+            k_skills=k_skills,
+            k_insights=k_insights,
+            similarity_threshold=self.retrieval_similarity_threshold
+            if similarity_threshold is None
+            else similarity_threshold,
+            candidate_pool_multiplier=candidate_pool_multiplier,
+            sampling_strategy=sampling_strategy or ("weighted" if sample else "topk"),
+            temperature=temperature,
+            epsilon=epsilon,
+            weight_alpha=weight_alpha,
+            similarity_alpha=similarity_alpha,
+        )
+        return [item.entry for item in self.retrieve_with_metadata(query, config=config)]
+
+    def retrieve_with_metadata(
+        self,
+        query: str,
+        config: Optional[RetrievalConfig] = None,
+    ) -> List[RetrievedEntry]:
+        config = config or RetrievalConfig(similarity_threshold=self.retrieval_similarity_threshold)
         if not self.entries:
             return []
         q_emb = hashed_embedding(query)
-        scored: List[Tuple[LibraryEntry, float, float]] = []
+        scored: List[Tuple[LibraryEntry, float, float, float]] = []
         for entry in self.entries.values():
             sim = cosine(q_emb, entry.embedding)
-            if sim >= self.retrieval_similarity_threshold:
-                # Similarity gates relevance; weight controls exploit/explore.
+            if sim >= config.similarity_threshold:
                 retrieval_weight = max(1e-6, (0.2 + sim) * max(entry.weight, 1e-6))
-                scored.append((entry, sim, retrieval_weight))
+                composite = self._retrieval_composite_score(entry, sim, retrieval_weight, config)
+                scored.append((entry, sim, retrieval_weight, composite))
         if not scored:
             return []
-        selected: List[LibraryEntry] = []
-        for typ, k in [("skill", k_skills), ("insight", k_insights)]:
-            group = [(e, sim, w) for (e, sim, w) in scored if e.type == typ]
-            group.sort(key=lambda x: (x[1] * x[2], x[1]), reverse=True)
-            group = group[: max(k * 4, k)]
-            if sample:
-                selected.extend(weighted_sample_without_replacement([g[0] for g in group], [g[2] for g in group], k, self.rng))
-            else:
-                selected.extend([g[0] for g in group[:k]])
-        for entry in selected:
-            entry.uses += 1
+
+        selected: List[RetrievedEntry] = []
+        for typ, k in [("skill", config.k_skills), ("insight", config.k_insights)]:
+            if k <= 0:
+                continue
+            group = [(e, sim, w, score) for (e, sim, w, score) in scored if e.type == typ]
+            group.sort(key=lambda x: (x[3], x[1], x[2]), reverse=True)
+            group = group[: max(k * max(1, config.candidate_pool_multiplier), k)]
+            chosen = self._select_retrieval_group(group, k, config)
+            selected.extend(
+                RetrievedEntry(entry=e, similarity=sim, retrieval_weight=w, rank=rank, selected_by=selected_by)
+                for rank, (e, sim, w, _score, selected_by) in enumerate(chosen, start=1)
+            )
+        for item in selected:
+            item.entry.uses += 1
         return selected
+
+    def _retrieval_composite_score(
+        self, entry: LibraryEntry, similarity: float, retrieval_weight: float, config: RetrievalConfig
+    ) -> float:
+        return (max(similarity, 1e-6) ** config.similarity_alpha) * (max(entry.weight, 1e-6) ** config.weight_alpha)
+
+    def _select_retrieval_group(
+        self,
+        group: Sequence[Tuple[LibraryEntry, float, float, float]],
+        k: int,
+        config: RetrievalConfig,
+    ) -> List[Tuple[LibraryEntry, float, float, float, str]]:
+        if not group:
+            return []
+        strategy = config.sampling_strategy.strip().lower()
+        if strategy == "topk":
+            return [(*item, "topk") for item in group[:k]]
+        if strategy == "weighted":
+            sampled = weighted_sample_without_replacement(group, [g[2] for g in group], k, self.rng)
+            return [(*item, "weighted") for item in sampled]
+        if strategy == "softmax":
+            temperature = max(config.temperature, 1e-6)
+            max_score = max(g[3] for g in group)
+            weights = [math.exp((g[3] - max_score) / temperature) for g in group]
+            sampled = weighted_sample_without_replacement(group, weights, k, self.rng)
+            return [(*item, "softmax") for item in sampled]
+        if strategy == "epsilon_greedy":
+            out: List[Tuple[LibraryEntry, float, float, float, str]] = []
+            remaining = list(group)
+            while remaining and len(out) < k:
+                if self.rng.random() < config.epsilon:
+                    idx = self.rng.randrange(len(remaining))
+                    item = remaining.pop(idx)
+                    out.append((*item, "epsilon_explore"))
+                else:
+                    item = remaining.pop(0)
+                    out.append((*item, "epsilon_topk"))
+            return out
+        raise ValueError(f"Unsupported sampling_strategy: {config.sampling_strategy}")
 
     def update_after_episode(
         self,
@@ -215,10 +321,14 @@ class EvolvingLibrary:
         new_ids: Sequence[str],
         score: float,
         success: Optional[bool] = None,
-    ) -> None:
-        score = clamp(score)
-        prev_baseline = float(self.stats.get("score_ema", 0.0))
-        immediate_ig = score - prev_baseline
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        context = dict(context or {})
+        context.setdefault("retrieved_ids", list(retrieved_ids))
+        context.setdefault("retrieved_count", len(retrieved_ids))
+        ig_info = self.baseline_estimator.compute_immediate_ig(score, context)
+        score = float(ig_info["score"])
+        immediate_ig = float(ig_info["immediate_ig"])
         positive_delta = max(0.0, immediate_ig)
 
         for entry_id in new_ids:
@@ -253,11 +363,8 @@ class EvolvingLibrary:
                 next_frontier.extend(entry.parents)
             frontier = next_frontier
 
-        n = int(self.stats.get("episodes", 0)) + 1
-        self.stats["episodes"] = n
-        self.stats["score_sum"] = float(self.stats.get("score_sum", 0.0)) + score
-        self.stats["score_ema"] = self._ema(prev_baseline, score)
-        self.stats["score_mean"] = self.stats["score_sum"] / n
+        self.baseline_estimator.update(score, context)
+        return ig_info
 
     def _ema(self, old: float, new: float) -> float:
         return self.ema_decay * float(old) + (1.0 - self.ema_decay) * float(new)
