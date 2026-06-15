@@ -57,3 +57,30 @@ Estimated score: {score}
 Trajectory:
 {trajectory}
 """
+
+LLM_MERGE_SYSTEM_PROMPT = """You consolidate reusable EvoLib skills and insights. Preserve generally useful knowledge, remove duplicates, and do not invent episode-specific facts. Return JSON only."""
+
+LLM_MERGE_PROMPT = """Merge the existing EvoLib entry with the candidate entry.
+
+Inputs:
+Existing {existing_type}:
+Title: {existing_title}
+Content: {existing_content}
+Tags: {existing_tags}
+
+Candidate {candidate_type}:
+Title: {candidate_title}
+Content: {candidate_content}
+Tags: {candidate_tags}
+
+Task context:
+{task_context}
+
+Candidate episode score: {score}
+
+Return JSON only with keys:
+- title: concise merged title
+- content: self-contained merged reusable skill/insight content
+- tags: short list of tags
+- rationale: one sentence explaining what was retained or changed
+"""
