@@ -131,6 +131,12 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             "score_info": _jsonable(score_info),
             "candidate_count": len(candidates),
             "library_size": len(library),
+            "lineage_edge_count": len(library.lineage_edges),
+            "fig_credit_events": {
+                "count": len(library.last_fig_credit_events),
+                "credit_total": sum(float(event.get("credit", 0.0)) for event in library.last_fig_credit_events),
+                "events": _jsonable(library.last_fig_credit_events),
+            },
         }
         append_jsonl(result_path, record)
 

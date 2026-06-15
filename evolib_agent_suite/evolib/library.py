@@ -44,6 +44,27 @@ class LibraryEntry:
         return cls(**data)
 
 
+@dataclass
+class LineageEdge:
+    parent_id: str
+    child_id: str
+    task_id: str
+    created_at: float = field(default_factory=time.time)
+    edge_type: str = "create"
+    source_score: float = 0.0
+    credit: float = 0.0
+    depth: int = 1
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LineageEdge":
+        allowed = cls.__dataclass_fields__.keys()
+        return cls(**{k: v for k, v in data.items() if k in allowed})
+
+
 class EvolvingLibrary:
     """Persistent EvoLib-style library.
 
@@ -75,6 +96,9 @@ class EvolvingLibrary:
         self.ema_decay = ema_decay
         self.rng = random.Random(seed)
         self.entries: Dict[str, LibraryEntry] = {}
+        self.lineage_edges: List[LineageEdge] = []
+        self.fig_events: List[Dict[str, Any]] = []
+        self.last_fig_credit_events: List[Dict[str, Any]] = []
         self.stats: Dict[str, Any] = {"episodes": 0, "score_ema": 0.0, "score_sum": 0.0}
         self.load()
 
@@ -84,12 +108,17 @@ class EvolvingLibrary:
         data = json.loads(self.path.read_text(encoding="utf-8"))
         self.stats = data.get("stats", self.stats)
         self.entries = {e["id"]: LibraryEntry.from_dict(e) for e in data.get("entries", [])}
+        self.lineage_edges = [LineageEdge.from_dict(e) for e in data.get("lineage_edges", [])]
+        self.fig_events = list(data.get("fig_events", []))
+        self.last_fig_credit_events = []
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "stats": self.stats,
             "entries": [entry.to_dict() for entry in self.entries.values()],
+            "lineage_edges": [edge.to_dict() for edge in self.lineage_edges],
+            "fig_events": self.fig_events,
         }
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -141,6 +170,30 @@ class EvolvingLibrary:
                 best = (entry, sim)
         return best
 
+    def _record_lineage_edges(
+        self,
+        parent_ids: Sequence[str],
+        child_id: str,
+        task_id: str,
+        score: float,
+        edge_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        for parent_id in dict.fromkeys(parent_ids):
+            if not parent_id or parent_id == child_id:
+                continue
+            self.lineage_edges.append(
+                LineageEdge(
+                    parent_id=parent_id,
+                    child_id=child_id,
+                    task_id=task_id,
+                    edge_type=edge_type,
+                    source_score=score,
+                    depth=1,
+                    metadata=dict(metadata or {}),
+                )
+            )
+
     def add_or_merge_many(
         self,
         candidates: Sequence[Dict[str, Any]],
@@ -159,6 +212,10 @@ class EvolvingLibrary:
                 entry.updated_at = time.time()
                 entry.source_task_ids = list(dict.fromkeys(entry.source_task_ids + [task_id]))
                 entry.parents = list(dict.fromkeys(entry.parents + list(parents)))
+                for parent_id in parents:
+                    parent = self.entries.get(parent_id)
+                    if parent and entry.id not in parent.children:
+                        parent.children.append(entry.id)
                 entry.tags = list(dict.fromkeys(entry.tags + candidate.tags))
                 # Keep the more general/longer wording, but avoid unbounded growth.
                 if len(candidate.content) > len(entry.content) and len(candidate.content) < 1200:
@@ -167,6 +224,14 @@ class EvolvingLibrary:
                     entry.embedding = hashed_embedding(entry.text)
                 entry.score_ema = self._ema(entry.score_ema, score)
                 entry.metadata["last_merge_similarity"] = sim
+                self._record_lineage_edges(
+                    parents,
+                    entry.id,
+                    task_id,
+                    score,
+                    edge_type="merge",
+                    metadata={"merge_similarity": sim, "candidate_id": candidate.id},
+                )
                 new_or_updated.append(entry.id)
             else:
                 self.entries[candidate.id] = candidate
@@ -174,6 +239,13 @@ class EvolvingLibrary:
                     parent = self.entries.get(parent_id)
                     if parent and candidate.id not in parent.children:
                         parent.children.append(candidate.id)
+                self._record_lineage_edges(
+                    candidate.parents,
+                    candidate.id,
+                    task_id,
+                    score,
+                    edge_type="create",
+                )
                 new_or_updated.append(candidate.id)
         return list(dict.fromkeys(new_or_updated))
 
@@ -220,6 +292,7 @@ class EvolvingLibrary:
         prev_baseline = float(self.stats.get("score_ema", 0.0))
         immediate_ig = score - prev_baseline
         positive_delta = max(0.0, immediate_ig)
+        episode_fig_events: List[Dict[str, Any]] = []
 
         for entry_id in new_ids:
             entry = self.entries.get(entry_id)
@@ -245,13 +318,29 @@ class EvolvingLibrary:
                 entry = self.entries.get(entry_id)
                 if not entry:
                     continue
-                entry.future_ig_ema = self._ema(entry.future_ig_ema, positive_delta * discount)
+                credit = positive_delta * discount
+                entry.future_ig_ema = self._ema(entry.future_ig_ema, credit)
                 entry.score_ema = self._ema(entry.score_ema, score)
                 if success:
                     entry.wins += 1
                 self._recompute_weight(entry)
+                event = {
+                    "entry_id": entry_id,
+                    "source_entry_ids": list(dict.fromkeys(new_ids)),
+                    "score": score,
+                    "baseline": prev_baseline,
+                    "immediate_ig": immediate_ig,
+                    "credit": credit,
+                    "depth": depth + 1,
+                    "success": success,
+                    "created_at": time.time(),
+                }
+                episode_fig_events.append(event)
                 next_frontier.extend(entry.parents)
             frontier = next_frontier
+
+        self.last_fig_credit_events = episode_fig_events
+        self.fig_events.extend(episode_fig_events)
 
         n = int(self.stats.get("episodes", 0)) + 1
         self.stats["episodes"] = n
@@ -268,6 +357,60 @@ class EvolvingLibrary:
         value = 1.0 + self.alpha_ig * entry.ig_ema + self.beta_future_ig * entry.future_ig_ema
         entry.weight = max(0.05, value + usage_bonus + win_bonus)
         entry.updated_at = time.time()
+
+    def _walk_lineage(self, entry_id: str, max_depth: int, reverse: bool = False) -> List[Dict[str, Any]]:
+        if max_depth < 1:
+            return []
+        results: List[Dict[str, Any]] = []
+        frontier: List[Tuple[str, int]] = [(entry_id, 0)]
+        visited = {entry_id}
+        while frontier:
+            current_id, depth = frontier.pop(0)
+            if depth >= max_depth:
+                continue
+            for edge in self.lineage_edges:
+                source_id = edge.child_id if reverse else edge.parent_id
+                target_id = edge.parent_id if reverse else edge.child_id
+                if source_id != current_id or target_id in visited:
+                    continue
+                visited.add(target_id)
+                next_depth = depth + 1
+                results.append(
+                    {
+                        "entry_id": target_id,
+                        "depth": next_depth,
+                        "edge": edge.to_dict(),
+                    }
+                )
+                frontier.append((target_id, next_depth))
+        return results
+
+    def get_ancestors(self, entry_id: str, max_depth: int = 2) -> List[Dict[str, Any]]:
+        return self._walk_lineage(entry_id, max_depth=max_depth, reverse=True)
+
+    def get_descendants(self, entry_id: str, max_depth: int = 2) -> List[Dict[str, Any]]:
+        return self._walk_lineage(entry_id, max_depth=max_depth, reverse=False)
+
+    def summarize_lineage(self, entry_id: str) -> Dict[str, Any]:
+        related_edges = [
+            edge for edge in self.lineage_edges if edge.parent_id == entry_id or edge.child_id == entry_id
+        ]
+        credit_events = [event for event in self.fig_events if event.get("entry_id") == entry_id]
+        by_type: Dict[str, int] = {}
+        for edge in related_edges:
+            by_type[edge.edge_type] = by_type.get(edge.edge_type, 0) + 1
+        return {
+            "entry_id": entry_id,
+            "exists": entry_id in self.entries,
+            "ancestor_count": len(self.get_ancestors(entry_id, max_depth=10)),
+            "descendant_count": len(self.get_descendants(entry_id, max_depth=10)),
+            "direct_parent_count": sum(1 for edge in self.lineage_edges if edge.child_id == entry_id),
+            "direct_child_count": sum(1 for edge in self.lineage_edges if edge.parent_id == entry_id),
+            "edge_count": len(related_edges),
+            "edge_types": by_type,
+            "fig_credit_event_count": len(credit_events),
+            "fig_credit_total": sum(float(event.get("credit", 0.0)) for event in credit_events),
+        }
 
     def format_for_prompt(self, entries: Sequence[LibraryEntry], max_chars: int = 5000) -> str:
         if not entries:
