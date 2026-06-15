@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional, Sequence
+import random
+from typing import List, Optional, Sequence
 
+from evolib_agent_suite.evolib.composition import CandidateSolution, CompositionConfig, select_candidate
 from evolib_agent_suite.evolib.library import EvolvingLibrary, LibraryEntry
 from evolib_agent_suite.evolib.prompts import ACTION_PROMPT, ACTION_SYSTEM_PROMPT
 from evolib_agent_suite.llm.base import BaseLLM
@@ -22,26 +24,36 @@ class EvoLibReActAgent:
         memory_size: int = 12,
         action_hint: str = DEFAULT_ACTION_HINT,
         max_prompt_chars: int = 18000,
+        composition_config: Optional[CompositionConfig] = None,
+        seed: int = 0,
     ) -> None:
         self.llm = llm
         self.library = library
         self.memory_size = memory_size
         self.action_hint = action_hint
         self.max_prompt_chars = max_prompt_chars
+        self.composition_config = composition_config or CompositionConfig()
+        self.rng = random.Random(seed)
         self.task: Optional[TaskSpec] = None
         self.entries: List[LibraryEntry] = []
+        self.candidate_solution: Optional[CandidateSolution] = None
         self.history: List[StepRecord] = []
         self.last_decision: Optional[ActionDecision] = None
 
     def reset(self, task: TaskSpec, entries: Sequence[LibraryEntry]) -> None:
         self.task = task
         self.entries = list(entries)
+        self.candidate_solution = select_candidate(
+            self.entries, config=self.composition_config, rng=self.rng
+        )
         self.history = []
         self.last_decision = None
 
     @property
     def used_entry_ids(self) -> List[str]:
-        return [e.id for e in self.entries]
+        if self.candidate_solution is None:
+            return []
+        return self.candidate_solution.entry_ids
 
     def observe_step(self, step: StepRecord) -> None:
         self.history.append(step)
@@ -49,7 +61,11 @@ class EvoLibReActAgent:
     def act(self, observation: str, available_actions: Optional[Sequence[str] | dict] = None) -> ActionDecision:
         if self.task is None:
             raise RuntimeError("Agent must be reset before act().")
-        library_block = self.library.format_for_prompt(self.entries)
+        candidate = self.candidate_solution
+        if candidate is None:
+            candidate = select_candidate(self.entries, config=self.composition_config, rng=self.rng)
+            self.candidate_solution = candidate
+        library_block = self.library.format_for_prompt(candidate.entries)
         history = self._format_history()
         available = self._format_available_actions(available_actions)
         action_hint = self.task.action_hint or self.action_hint
