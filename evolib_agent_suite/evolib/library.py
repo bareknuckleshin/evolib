@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import random
 import time
 import uuid
@@ -12,6 +11,7 @@ from evolib_agent_suite.evolib.consolidation import ConsolidationConfig, Consoli
 from evolib_agent_suite.utils import clamp, cosine, hashed_embedding
 from evolib_agent_suite.evolib.ig import BaselineEstimator, IGConfig
 from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, SamplingTrace, rng_for_context
+from evolib_agent_suite.evolib.storage import JsonLibraryStorage, LibraryStorage, SQLiteLibraryStorage
 
 
 @dataclass
@@ -122,8 +122,12 @@ class EvolvingLibrary:
         consolidation_config: Optional[ConsolidationConfig] = None,
         llm: Any = None,
         ig_config: Optional[Union[IGConfig, Dict[str, Any]]] = None,
+        storage: Optional[LibraryStorage] = None,
+        storage_backend: str = "json",
     ) -> None:
         self.path = Path(path)
+        self.storage = storage or self._build_storage(self.path, storage_backend)
+        self.schema_version = 2
         self.similarity_merge_threshold = similarity_merge_threshold
         self.retrieval_similarity_threshold = retrieval_similarity_threshold
         self.alpha_ig = alpha_ig
@@ -148,30 +152,53 @@ class EvolvingLibrary:
         self.entries: Dict[str, LibraryEntry] = {}
         self.lineage_edges: List[LineageEdge] = []
         self.fig_events: List[Dict[str, Any]] = []
+        self.merge_events: List[Dict[str, Any]] = []
+        self.retrieval_events: List[Dict[str, Any]] = []
+        self.policy_snapshots: List[Dict[str, Any]] = []
         self.last_fig_credit_events: List[Dict[str, Any]] = []
+        self.last_retrieval_event: Dict[str, Any] = {}
+        self.last_consolidation_decisions: List[Dict[str, Any]] = []
         self.stats: Dict[str, Any] = {"episodes": 0, "score_ema": 0.0, "score_sum": 0.0}
         self.load()
         self.baseline_estimator = BaselineEstimator(self.stats, self.ig_config)
 
+    def _build_storage(self, path: Path, backend: str) -> LibraryStorage:
+        backend = (backend or "json").strip().lower()
+        if backend == "json":
+            return JsonLibraryStorage(path)
+        if backend == "sqlite":
+            return SQLiteLibraryStorage(path)
+        raise ValueError(f"Unsupported library storage backend: {backend}")
+
     def load(self) -> None:
-        if not self.path.exists():
+        data = self.storage.load()
+        if not data:
             return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.schema_version = int(data.get("schema_version", 1))
         self.stats = data.get("stats", self.stats)
         self.entries = {e["id"]: LibraryEntry.from_dict(e) for e in data.get("entries", [])}
         self.lineage_edges = [LineageEdge.from_dict(e) for e in data.get("lineage_edges", [])]
-        self.fig_events = list(data.get("fig_events", []))
+        self.fig_events = list(data.get("ig_events", data.get("fig_events", [])))
+        self.merge_events = list(data.get("merge_events", []))
+        self.retrieval_events = list(data.get("retrieval_events", []))
+        self.policy_snapshots = list(data.get("policy_snapshots", []))
         self.last_fig_credit_events = []
+        self.last_retrieval_event = {}
+        self.last_consolidation_decisions = []
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": self.schema_version,
             "stats": self.stats,
             "entries": [entry.to_dict() for entry in self.entries.values()],
             "lineage_edges": [edge.to_dict() for edge in self.lineage_edges],
+            "merge_events": self.merge_events,
+            "ig_events": self.fig_events,
             "fig_events": self.fig_events,
+            "retrieval_events": self.retrieval_events,
+            "policy_snapshots": self.policy_snapshots,
         }
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.storage.save(payload)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -247,6 +274,7 @@ class EvolvingLibrary:
         task_context: str = "",
     ) -> List[str]:
         new_or_updated: List[str] = []
+        self.last_consolidation_decisions = []
         for item in candidates:
             candidate = self._make_entry(item, parents=parents, task_id=task_id, score=score)
             if not candidate.content:
@@ -286,6 +314,18 @@ class EvolvingLibrary:
                     parents=parents,
                     task_context=task_context,
                 )
+                decision = {
+                    "action": "merge",
+                    "task_id": task_id,
+                    "candidate_id": candidate.id,
+                    "target_id": entry.id,
+                    "similarity": sim,
+                    "score": score,
+                    "strategy": self.consolidation_config.merge_strategy,
+                    "created_at": time.time(),
+                }
+                self.last_consolidation_decisions.append(decision)
+                self.merge_events.append(decision)
                 new_or_updated.append(entry.id)
             else:
                 self.entries[candidate.id] = candidate
@@ -300,6 +340,14 @@ class EvolvingLibrary:
                     score,
                     edge_type="create",
                 )
+                self.last_consolidation_decisions.append({
+                    "action": "create",
+                    "task_id": task_id,
+                    "candidate_id": candidate.id,
+                    "target_id": candidate.id,
+                    "score": score,
+                    "created_at": time.time(),
+                })
                 new_or_updated.append(candidate.id)
         return list(dict.fromkeys(new_or_updated))
 
@@ -340,6 +388,7 @@ class EvolvingLibrary:
     ) -> List[RetrievedEntry]:
         config = config or RetrievalConfig(similarity_threshold=self.retrieval_similarity_threshold)
         if not self.entries:
+            self.last_retrieval_event = {"candidate_count": 0, "selected_entry_ids": [], "config": self._config_dict(config)}
             return []
         q_emb = hashed_embedding(query)
         scored: List[Tuple[LibraryEntry, float, float, float]] = []
@@ -350,8 +399,10 @@ class EvolvingLibrary:
                 composite = self._retrieval_composite_score(entry, sim, retrieval_weight, config)
                 scored.append((entry, sim, retrieval_weight, composite))
         if not scored:
+            self.last_retrieval_event = {"candidate_count": 0, "selected_entry_ids": [], "config": self._config_dict(config)}
             return []
 
+        candidate_count = len(scored)
         selected: List[RetrievedEntry] = []
         for typ, k in [("skill", config.k_skills), ("insight", config.k_insights)]:
             if k <= 0:
@@ -375,7 +426,17 @@ class EvolvingLibrary:
             )
         for item in selected:
             item.entry.uses += 1
+        self.last_retrieval_event = {
+            "candidate_count": candidate_count,
+            "selected_entry_ids": [item.entry.id for item in selected],
+            "config": self._config_dict(config),
+            "created_at": time.time(),
+        }
+        self.retrieval_events.append(self.last_retrieval_event)
         return selected
+
+    def _config_dict(self, config: Any) -> Dict[str, Any]:
+        return asdict(config) if hasattr(config, "__dataclass_fields__") else dict(config or {})
 
     def _retrieval_composite_score(
         self, entry: LibraryEntry, similarity: float, retrieval_weight: float, config: RetrievalConfig

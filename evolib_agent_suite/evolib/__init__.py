@@ -1,4 +1,5 @@
 from .library import EvolvingLibrary, LibraryEntry, LineageEdge, RetrievalConfig, RetrievedEntry
+from .storage import JsonLibraryStorage, SQLiteLibraryStorage
 from .consolidation import ConsolidationConfig, ConsolidationPolicy, LLMMerger
 from .ig import BaselineEstimator, IGConfig
 from .extractors import AbstractionExtractor
@@ -26,4 +27,6 @@ __all__ = [
     "SamplingTrace",
     "derive_seed",
     "rng_for_context",
+    "JsonLibraryStorage",
+    "SQLiteLibraryStorage",
 ]

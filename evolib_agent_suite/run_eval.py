@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     result_path = out_dir / "trajectories.jsonl"
     metrics_path = out_dir / "metrics.json"
     library_path = config.get("library", {}).get("path", str(out_dir / "library.json"))
+    library_storage_cfg = config.get("library", {}).get("storage", {})
+    library_storage_backend = str(library_storage_cfg.get("backend", config.get("library", {}).get("storage_backend", "json")))
 
     llm = build_llm(config.get("llm", {"provider": "heuristic"}))
     env = build_env(config.get("env", {"backend": "mock"}))
@@ -43,6 +46,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         llm=llm,
         ema_decay=ig_cfg.ema_decay,
         ig_config=ig_cfg,
+        storage_backend=library_storage_backend,
     )
     extractor = AbstractionExtractor(llm)
 
@@ -85,6 +89,15 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         without_replacement=_as_bool(library_cfg.get("without_replacement", True)),
     )
 
+    library.policy_snapshots.append({
+        "created_at": time.time(),
+        "retrieval_policy": asdict(retrieval_config),
+        "composition_policy": asdict(composition_cfg),
+        "consolidation_policy": asdict(library.consolidation_config),
+        "ig_policy": asdict(library.ig_config),
+        "storage_backend": library_storage_backend,
+    })
+
     metrics: Dict[str, Any] = {
         "episodes": 0,
         "successes": 0,
@@ -93,6 +106,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         "progress_sum": 0.0,
         "library_size_start": len(library),
         "library_path": str(library.path),
+        "library_storage_backend": library_storage_backend,
         "started_at": time.time(),
     }
 
@@ -118,6 +132,10 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
                 "candidate_solution_id": candidate.id if candidate else None,
                 "composition_type": candidate.composition_type if candidate else None,
                 "composed_entry_ids": composed_entry_ids,
+                "retrieval_candidate_count": int(library.last_retrieval_event.get("candidate_count", len(retrieved))),
+                "selected_entry_ids": [item.entry.id for item in retrieved],
+                "retrieval_policy_config": asdict(retrieval_config),
+                "composition_policy_config": asdict(composition_cfg),
             },
         )
         obs = reset.observation
@@ -182,6 +200,10 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             "composition_type": traj.metadata.get("composition_type"),
             "composed_entry_ids": traj.metadata.get("composed_entry_ids", []),
             "retrieved_entry_ids": traj.used_entry_ids,
+            "retrieval_candidate_count": int(library.last_retrieval_event.get("candidate_count", len(retrieved))),
+            "selected_entry_ids": [item.entry.id for item in retrieved],
+            "retrieval_policy_config": asdict(retrieval_config),
+            "composition_policy_config": asdict(composition_cfg),
             "retrieved_entries": [
                 {
                     "id": item.entry.id,
@@ -205,6 +227,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
                 "credit_total": sum(float(event.get("credit", 0.0)) for event in library.last_fig_credit_events),
                 "events": _jsonable(library.last_fig_credit_events),
             },
+            "ig_baseline_value": ig_info["baseline"],
+            "propagated_fig_credits": _jsonable(library.last_fig_credit_events),
+            "consolidation_decisions": _jsonable(library.last_consolidation_decisions),
             "baseline": ig_info["baseline"],
             "score": ig_info["score"],
             "immediate_ig": ig_info["immediate_ig"],
@@ -221,6 +246,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             {
                 "episode": metrics["episodes"],
                 "task_id": task.task_id,
+                "ig_baseline_value": ig_info["baseline"],
                 "baseline": ig_info["baseline"],
                 "score": ig_info["score"],
                 "immediate_ig": ig_info["immediate_ig"],
@@ -238,7 +264,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
                     "reward": traj.final_reward,
                     "score_estimate": score,
                     "library_size": len(library),
-                    "baseline": ig_info["baseline"],
+                    "ig_baseline_value": ig_info["baseline"],
+                "baseline": ig_info["baseline"],
                     "immediate_ig": ig_info["immediate_ig"],
                     "baseline_strategy": ig_info["baseline_strategy"],
                 },
