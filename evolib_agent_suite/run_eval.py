@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
 from evolib_agent_suite.envs import build_env
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
+from evolib_agent_suite.evolib import AbstractionExtractor, CompositionConfig, EvolvingLibrary
 from evolib_agent_suite.llm import build_llm
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 from evolib_agent_suite.utils import append_jsonl, ensure_dir, load_config
@@ -31,12 +31,15 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     extractor = AbstractionExtractor(llm)
 
     agent_cfg = config.get("agent", {})
+    composition_cfg = _composition_config(agent_cfg.get("composition", {}))
     agent = EvoLibReActAgent(
         llm=llm,
         library=library,
         memory_size=int(agent_cfg.get("memory_size", 12)),
         action_hint=agent_cfg.get("action_hint", "Return one exact action string."),
         max_prompt_chars=int(agent_cfg.get("max_prompt_chars", 18000)),
+        composition_config=composition_cfg,
+        seed=int(config.get("seed", 0)),
     )
 
     eval_cfg = config.get("eval", {})
@@ -69,11 +72,18 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             sample=sample_library,
         )
         agent.reset(task, entries)
+        candidate = agent.candidate_solution
+        composed_entry_ids = candidate.entry_ids if candidate else []
         traj = Trajectory(
             task=task,
             initial_observation=reset.observation,
-            used_entry_ids=[e.id for e in entries],
-            metadata={"reset_info": _jsonable(reset.info)},
+            used_entry_ids=composed_entry_ids,
+            metadata={
+                "reset_info": _jsonable(reset.info),
+                "candidate_solution_id": candidate.id if candidate else None,
+                "composition_type": candidate.composition_type if candidate else None,
+                "composed_entry_ids": composed_entry_ids,
+            },
         )
         obs = reset.observation
         final_out = None
@@ -126,7 +136,10 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
 
         record = traj.to_dict()
         record["evolib"] = {
-            "retrieved_entry_ids": traj.used_entry_ids,
+            "retrieved_entry_ids": [e.id for e in entries],
+            "candidate_solution_id": traj.metadata.get("candidate_solution_id"),
+            "composition_type": traj.metadata.get("composition_type"),
+            "composed_entry_ids": traj.metadata.get("composed_entry_ids", []),
             "new_or_updated_entry_ids": new_ids,
             "score_info": _jsonable(score_info),
             "candidate_count": len(candidates),
@@ -161,6 +174,24 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     metrics.update(_summarize(metrics, len(library)))
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     return metrics
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _composition_config(data: Dict[str, Any]) -> CompositionConfig:
+    return CompositionConfig(
+        strategy=data.get("strategy", "all_context"),
+        max_candidates=int(data.get("max_candidates", 8)),
+        max_skills_per_candidate=int(data.get("max_skills_per_candidate", 4)),
+        max_insights_per_candidate=int(data.get("max_insights_per_candidate", 4)),
+        include_singletons=_as_bool(data.get("include_singletons", True)),
+        include_mixed=_as_bool(data.get("include_mixed", True)),
+        score_policy=data.get("score_policy", "sum_weight"),
+    )
 
 
 def _summarize(metrics: Dict[str, Any], library_size: int) -> Dict[str, Any]:
