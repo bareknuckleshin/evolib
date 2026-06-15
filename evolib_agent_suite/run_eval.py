@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
 from evolib_agent_suite.envs import build_env
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, IGConfig
+from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, IGConfig, RetrievalConfig
 from evolib_agent_suite.llm import build_llm
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 from evolib_agent_suite.utils import append_jsonl, ensure_dir, load_config
@@ -50,6 +50,22 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     k_skills = int(library_cfg.get("k_skills", 4))
     k_insights = int(library_cfg.get("k_insights", 4))
     sample_library = bool(library_cfg.get("sample", True))
+    library_cfg = config.get("library", {})
+    retrieval_config = RetrievalConfig(
+        k_skills=int(library_cfg.get("k_skills", 4)),
+        k_insights=int(library_cfg.get("k_insights", 4)),
+        similarity_threshold=float(
+            library_cfg.get("similarity_threshold", library_cfg.get("retrieval_similarity_threshold", 0.05))
+        ),
+        candidate_pool_multiplier=int(library_cfg.get("candidate_pool_multiplier", 4)),
+        sampling_strategy=str(
+            library_cfg.get("sampling_strategy", "weighted" if bool(library_cfg.get("sample", True)) else "topk")
+        ),
+        temperature=float(library_cfg.get("temperature", 1.0)),
+        epsilon=float(library_cfg.get("epsilon", 0.1)),
+        weight_alpha=float(library_cfg.get("weight_alpha", 1.0)),
+        similarity_alpha=float(library_cfg.get("similarity_alpha", 1.0)),
+    )
 
     metrics: Dict[str, Any] = {
         "episodes": 0,
@@ -66,12 +82,11 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         reset = env.reset(task)
         if reset.goal:
             task.goal = reset.goal
-        entries = library.retrieve(
+        retrieved = library.retrieve_with_metadata(
             query=f"{task.domain}\n{task.goal}\n{reset.observation}",
-            k_skills=k_skills,
-            k_insights=k_insights,
-            sample=sample_library,
+            config=retrieval_config,
         )
+        entries = [item.entry for item in retrieved]
         agent.reset(task, entries)
         traj = Trajectory(
             task=task,
@@ -138,6 +153,16 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         record = traj.to_dict()
         record["evolib"] = {
             "retrieved_entry_ids": traj.used_entry_ids,
+            "retrieved_entries": [
+                {
+                    "id": item.entry.id,
+                    "similarity": item.similarity,
+                    "retrieval_weight": item.retrieval_weight,
+                    "rank": item.rank,
+                    "selected_by": item.selected_by,
+                }
+                for item in retrieved
+            ],
             "new_or_updated_entry_ids": new_ids,
             "score_info": _jsonable(score_info),
             "candidate_count": len(candidates),

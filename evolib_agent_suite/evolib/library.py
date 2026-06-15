@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 import uuid
@@ -43,6 +44,28 @@ class LibraryEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LibraryEntry":
         return cls(**data)
+
+
+@dataclass
+class RetrievalConfig:
+    k_skills: int = 4
+    k_insights: int = 4
+    similarity_threshold: float = 0.05
+    candidate_pool_multiplier: int = 4
+    sampling_strategy: str = "weighted"
+    temperature: float = 1.0
+    epsilon: float = 0.1
+    weight_alpha: float = 1.0
+    similarity_alpha: float = 1.0
+
+
+@dataclass
+class RetrievedEntry:
+    entry: LibraryEntry
+    similarity: float
+    retrieval_weight: float
+    rank: int
+    selected_by: str
 
 
 class EvolvingLibrary:
@@ -192,31 +215,102 @@ class EvolvingLibrary:
         k_skills: int = 4,
         k_insights: int = 4,
         sample: bool = True,
+        sampling_strategy: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+        candidate_pool_multiplier: int = 4,
+        temperature: float = 1.0,
+        epsilon: float = 0.1,
+        weight_alpha: float = 1.0,
+        similarity_alpha: float = 1.0,
     ) -> List[LibraryEntry]:
+        config = RetrievalConfig(
+            k_skills=k_skills,
+            k_insights=k_insights,
+            similarity_threshold=self.retrieval_similarity_threshold
+            if similarity_threshold is None
+            else similarity_threshold,
+            candidate_pool_multiplier=candidate_pool_multiplier,
+            sampling_strategy=sampling_strategy or ("weighted" if sample else "topk"),
+            temperature=temperature,
+            epsilon=epsilon,
+            weight_alpha=weight_alpha,
+            similarity_alpha=similarity_alpha,
+        )
+        return [item.entry for item in self.retrieve_with_metadata(query, config=config)]
+
+    def retrieve_with_metadata(
+        self,
+        query: str,
+        config: Optional[RetrievalConfig] = None,
+    ) -> List[RetrievedEntry]:
+        config = config or RetrievalConfig(similarity_threshold=self.retrieval_similarity_threshold)
         if not self.entries:
             return []
         q_emb = hashed_embedding(query)
-        scored: List[Tuple[LibraryEntry, float, float]] = []
+        scored: List[Tuple[LibraryEntry, float, float, float]] = []
         for entry in self.entries.values():
             sim = cosine(q_emb, entry.embedding)
-            if sim >= self.retrieval_similarity_threshold:
-                # Similarity gates relevance; weight controls exploit/explore.
+            if sim >= config.similarity_threshold:
                 retrieval_weight = max(1e-6, (0.2 + sim) * max(entry.weight, 1e-6))
-                scored.append((entry, sim, retrieval_weight))
+                composite = self._retrieval_composite_score(entry, sim, retrieval_weight, config)
+                scored.append((entry, sim, retrieval_weight, composite))
         if not scored:
             return []
-        selected: List[LibraryEntry] = []
-        for typ, k in [("skill", k_skills), ("insight", k_insights)]:
-            group = [(e, sim, w) for (e, sim, w) in scored if e.type == typ]
-            group.sort(key=lambda x: (x[1] * x[2], x[1]), reverse=True)
-            group = group[: max(k * 4, k)]
-            if sample:
-                selected.extend(weighted_sample_without_replacement([g[0] for g in group], [g[2] for g in group], k, self.rng))
-            else:
-                selected.extend([g[0] for g in group[:k]])
-        for entry in selected:
-            entry.uses += 1
+
+        selected: List[RetrievedEntry] = []
+        for typ, k in [("skill", config.k_skills), ("insight", config.k_insights)]:
+            if k <= 0:
+                continue
+            group = [(e, sim, w, score) for (e, sim, w, score) in scored if e.type == typ]
+            group.sort(key=lambda x: (x[3], x[1], x[2]), reverse=True)
+            group = group[: max(k * max(1, config.candidate_pool_multiplier), k)]
+            chosen = self._select_retrieval_group(group, k, config)
+            selected.extend(
+                RetrievedEntry(entry=e, similarity=sim, retrieval_weight=w, rank=rank, selected_by=selected_by)
+                for rank, (e, sim, w, _score, selected_by) in enumerate(chosen, start=1)
+            )
+        for item in selected:
+            item.entry.uses += 1
         return selected
+
+    def _retrieval_composite_score(
+        self, entry: LibraryEntry, similarity: float, retrieval_weight: float, config: RetrievalConfig
+    ) -> float:
+        return (max(similarity, 1e-6) ** config.similarity_alpha) * (max(entry.weight, 1e-6) ** config.weight_alpha)
+
+    def _select_retrieval_group(
+        self,
+        group: Sequence[Tuple[LibraryEntry, float, float, float]],
+        k: int,
+        config: RetrievalConfig,
+    ) -> List[Tuple[LibraryEntry, float, float, float, str]]:
+        if not group:
+            return []
+        strategy = config.sampling_strategy.strip().lower()
+        if strategy == "topk":
+            return [(*item, "topk") for item in group[:k]]
+        if strategy == "weighted":
+            sampled = weighted_sample_without_replacement(group, [g[2] for g in group], k, self.rng)
+            return [(*item, "weighted") for item in sampled]
+        if strategy == "softmax":
+            temperature = max(config.temperature, 1e-6)
+            max_score = max(g[3] for g in group)
+            weights = [math.exp((g[3] - max_score) / temperature) for g in group]
+            sampled = weighted_sample_without_replacement(group, weights, k, self.rng)
+            return [(*item, "softmax") for item in sampled]
+        if strategy == "epsilon_greedy":
+            out: List[Tuple[LibraryEntry, float, float, float, str]] = []
+            remaining = list(group)
+            while remaining and len(out) < k:
+                if self.rng.random() < config.epsilon:
+                    idx = self.rng.randrange(len(remaining))
+                    item = remaining.pop(idx)
+                    out.append((*item, "epsilon_explore"))
+                else:
+                    item = remaining.pop(0)
+                    out.append((*item, "epsilon_topk"))
+            return out
+        raise ValueError(f"Unsupported sampling_strategy: {config.sampling_strategy}")
 
     def update_after_episode(
         self,

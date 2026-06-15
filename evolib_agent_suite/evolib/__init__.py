@@ -1,5 +1,5 @@
 from .ig import BaselineEstimator, IGConfig
-from .library import EvolvingLibrary, LibraryEntry
+from .library import EvolvingLibrary, LibraryEntry, RetrievalConfig, RetrievedEntry
 from .extractors import AbstractionExtractor
 
-__all__ = ["EvolvingLibrary", "LibraryEntry", "AbstractionExtractor", "IGConfig", "BaselineEstimator"]
+__all__ = ["EvolvingLibrary", "LibraryEntry", "RetrievalConfig", "RetrievedEntry", "AbstractionExtractor", "IGConfig", "BaselineEstimator"]
