@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import random
 import time
 import uuid
@@ -10,8 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from evolib_agent_suite.evolib.consolidation import ConsolidationConfig, ConsolidationPolicy, LLMMerger
-from evolib_agent_suite.utils import clamp, cosine, hashed_embedding, weighted_sample_without_replacement
+from evolib_agent_suite.utils import clamp, cosine, hashed_embedding
 from evolib_agent_suite.evolib.ig import BaselineEstimator, IGConfig
+from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, SamplingTrace, rng_for_context
 
 
 @dataclass
@@ -66,6 +66,9 @@ class LineageEdge:
     def from_dict(cls, data: Dict[str, Any]) -> "LineageEdge":
         allowed = cls.__dataclass_fields__.keys()
         return cls(**{k: v for k, v in data.items() if k in allowed})
+
+
+@dataclass
 class RetrievalConfig:
     k_skills: int = 4
     k_insights: int = 4
@@ -76,6 +79,10 @@ class RetrievalConfig:
     epsilon: float = 0.1
     weight_alpha: float = 1.0
     similarity_alpha: float = 1.0
+    top_p: float = 0.9
+    seed: int = 0
+    without_replacement: bool = True
+    context_id: str = ""
 
 
 @dataclass
@@ -85,6 +92,9 @@ class RetrievedEntry:
     retrieval_weight: float
     rank: int
     selected_by: str
+    sampling_seed: Optional[int] = None
+    sampling_base_seed: Optional[int] = None
+    sampling_context_id: str = ""
 
 
 class EvolvingLibrary:
@@ -125,6 +135,7 @@ class EvolvingLibrary:
             ig_data = dict(ig_config or {})
             ig_data.setdefault("ema_decay", ema_decay)
             self.ig_config = IGConfig(**ig_data)
+        self.seed = int(seed)
         self.rng = random.Random(seed)
         if consolidation_config is None:
             consolidation_config = ConsolidationConfig(
@@ -265,6 +276,7 @@ class EvolvingLibrary:
                     score,
                     edge_type="merge",
                     metadata={"merge_similarity": sim, "candidate_id": candidate.id},
+                )
                 self.consolidation_policy.merge(
                     entry,
                     candidate,
@@ -317,6 +329,7 @@ class EvolvingLibrary:
             epsilon=epsilon,
             weight_alpha=weight_alpha,
             similarity_alpha=similarity_alpha,
+            seed=self.seed,
         )
         return [item.entry for item in self.retrieve_with_metadata(query, config=config)]
 
@@ -348,8 +361,17 @@ class EvolvingLibrary:
             group = group[: max(k * max(1, config.candidate_pool_multiplier), k)]
             chosen = self._select_retrieval_group(group, k, config)
             selected.extend(
-                RetrievedEntry(entry=e, similarity=sim, retrieval_weight=w, rank=rank, selected_by=selected_by)
-                for rank, (e, sim, w, _score, selected_by) in enumerate(chosen, start=1)
+                RetrievedEntry(
+                    entry=e,
+                    similarity=sim,
+                    retrieval_weight=w,
+                    rank=rank,
+                    selected_by=selected_by,
+                    sampling_seed=trace.derived_seed,
+                    sampling_base_seed=trace.base_seed,
+                    sampling_context_id=trace.context_id,
+                )
+                for rank, (e, sim, w, _score, selected_by, trace) in enumerate(chosen, start=1)
             )
         for item in selected:
             item.entry.uses += 1
@@ -365,34 +387,24 @@ class EvolvingLibrary:
         group: Sequence[Tuple[LibraryEntry, float, float, float]],
         k: int,
         config: RetrievalConfig,
-    ) -> List[Tuple[LibraryEntry, float, float, float, str]]:
+    ) -> List[Tuple[LibraryEntry, float, float, float, str, SamplingTrace]]:
         if not group:
             return []
-        strategy = config.sampling_strategy.strip().lower()
-        if strategy == "topk":
-            return [(*item, "topk") for item in group[:k]]
-        if strategy == "weighted":
-            sampled = weighted_sample_without_replacement(group, [g[2] for g in group], k, self.rng)
-            return [(*item, "weighted") for item in sampled]
-        if strategy == "softmax":
-            temperature = max(config.temperature, 1e-6)
-            max_score = max(g[3] for g in group)
-            weights = [math.exp((g[3] - max_score) / temperature) for g in group]
-            sampled = weighted_sample_without_replacement(group, weights, k, self.rng)
-            return [(*item, "softmax") for item in sampled]
-        if strategy == "epsilon_greedy":
-            out: List[Tuple[LibraryEntry, float, float, float, str]] = []
-            remaining = list(group)
-            while remaining and len(out) < k:
-                if self.rng.random() < config.epsilon:
-                    idx = self.rng.randrange(len(remaining))
-                    item = remaining.pop(idx)
-                    out.append((*item, "epsilon_explore"))
-                else:
-                    item = remaining.pop(0)
-                    out.append((*item, "epsilon_topk"))
-            return out
-        raise ValueError(f"Unsupported sampling_strategy: {config.sampling_strategy}")
+        sampling_config = SamplingConfig(
+            strategy=config.sampling_strategy,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            epsilon=config.epsilon,
+            seed=config.seed or self.seed,
+            without_replacement=config.without_replacement,
+        )
+        group_type = group[0][0].type if group else "entry"
+        rng, trace = rng_for_context(sampling_config, config.context_id, group_type, k)
+        scores = [g[3] for g in group]
+        if sampling_config.strategy == "weighted":
+            scores = [g[2] for g in group]
+        sampled = SamplingPolicy(sampling_config).sample(group, scores, k, rng)
+        return [(*item, sampling_config.strategy, trace) for item in sampled]
 
     def update_after_episode(
         self,
@@ -406,6 +418,7 @@ class EvolvingLibrary:
         context.setdefault("retrieved_ids", list(retrieved_ids))
         context.setdefault("retrieved_count", len(retrieved_ids))
         ig_info = self.baseline_estimator.compute_immediate_ig(score, context)
+        prev_baseline = float(ig_info["baseline"])
         score = float(ig_info["score"])
         immediate_ig = float(ig_info["immediate_ig"])
         positive_delta = max(0.0, immediate_ig)
