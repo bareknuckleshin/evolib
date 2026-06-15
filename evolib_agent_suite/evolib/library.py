@@ -7,9 +7,10 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from evolib_agent_suite.utils import clamp, cosine, hashed_embedding, weighted_sample_without_replacement
+from evolib_agent_suite.evolib.ig import BaselineEstimator, IGConfig
+from evolib_agent_suite.utils import cosine, hashed_embedding, weighted_sample_without_replacement
 
 
 @dataclass
@@ -89,6 +90,7 @@ class EvolvingLibrary:
         alpha_ig: float = 1.0,
         beta_future_ig: float = 0.7,
         ema_decay: float = 0.85,
+        ig_config: Optional[Union[IGConfig, Dict[str, Any]]] = None,
     ) -> None:
         self.path = Path(path)
         self.similarity_merge_threshold = similarity_merge_threshold
@@ -96,10 +98,17 @@ class EvolvingLibrary:
         self.alpha_ig = alpha_ig
         self.beta_future_ig = beta_future_ig
         self.ema_decay = ema_decay
+        if isinstance(ig_config, IGConfig):
+            self.ig_config = ig_config
+        else:
+            ig_data = dict(ig_config or {})
+            ig_data.setdefault("ema_decay", ema_decay)
+            self.ig_config = IGConfig(**ig_data)
         self.rng = random.Random(seed)
         self.entries: Dict[str, LibraryEntry] = {}
         self.stats: Dict[str, Any] = {"episodes": 0, "score_ema": 0.0, "score_sum": 0.0}
         self.load()
+        self.baseline_estimator = BaselineEstimator(self.stats, self.ig_config)
 
     def load(self) -> None:
         if not self.path.exists():
@@ -309,10 +318,14 @@ class EvolvingLibrary:
         new_ids: Sequence[str],
         score: float,
         success: Optional[bool] = None,
-    ) -> None:
-        score = clamp(score)
-        prev_baseline = float(self.stats.get("score_ema", 0.0))
-        immediate_ig = score - prev_baseline
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        context = dict(context or {})
+        context.setdefault("retrieved_ids", list(retrieved_ids))
+        context.setdefault("retrieved_count", len(retrieved_ids))
+        ig_info = self.baseline_estimator.compute_immediate_ig(score, context)
+        score = float(ig_info["score"])
+        immediate_ig = float(ig_info["immediate_ig"])
         positive_delta = max(0.0, immediate_ig)
 
         for entry_id in new_ids:
@@ -347,11 +360,8 @@ class EvolvingLibrary:
                 next_frontier.extend(entry.parents)
             frontier = next_frontier
 
-        n = int(self.stats.get("episodes", 0)) + 1
-        self.stats["episodes"] = n
-        self.stats["score_sum"] = float(self.stats.get("score_sum", 0.0)) + score
-        self.stats["score_ema"] = self._ema(prev_baseline, score)
-        self.stats["score_mean"] = self.stats["score_sum"] / n
+        self.baseline_estimator.update(score, context)
+        return ig_info
 
     def _ema(self, old: float, new: float) -> float:
         return self.ema_decay * float(old) + (1.0 - self.ema_decay) * float(new)
