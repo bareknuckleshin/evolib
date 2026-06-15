@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from evolib_agent_suite.evolib.consolidation import ConsolidationConfig, ConsolidationPolicy, LLMMerger
 from evolib_agent_suite.utils import clamp, cosine, hashed_embedding, weighted_sample_without_replacement
 
 
@@ -66,6 +67,8 @@ class EvolvingLibrary:
         alpha_ig: float = 1.0,
         beta_future_ig: float = 0.7,
         ema_decay: float = 0.85,
+        consolidation_config: Optional[ConsolidationConfig] = None,
+        llm: Any = None,
     ) -> None:
         self.path = Path(path)
         self.similarity_merge_threshold = similarity_merge_threshold
@@ -74,6 +77,14 @@ class EvolvingLibrary:
         self.beta_future_ig = beta_future_ig
         self.ema_decay = ema_decay
         self.rng = random.Random(seed)
+        if consolidation_config is None:
+            consolidation_config = ConsolidationConfig(
+                similarity_threshold=similarity_merge_threshold,
+                ema_decay=ema_decay,
+            )
+        self.consolidation_config = consolidation_config
+        merger = LLMMerger(llm) if llm is not None and consolidation_config.merge_strategy == "llm_merge" else None
+        self.consolidation_policy = ConsolidationPolicy(consolidation_config, llm_merger=merger)
         self.entries: Dict[str, LibraryEntry] = {}
         self.stats: Dict[str, Any] = {"episodes": 0, "score_ema": 0.0, "score_sum": 0.0}
         self.load()
@@ -132,14 +143,7 @@ class EvolvingLibrary:
         )
 
     def _find_merge_target(self, candidate: LibraryEntry) -> Optional[Tuple[LibraryEntry, float]]:
-        best: Optional[Tuple[LibraryEntry, float]] = None
-        for entry in self.entries.values():
-            if entry.type != candidate.type:
-                continue
-            sim = cosine(candidate.embedding, entry.embedding)
-            if sim >= self.similarity_merge_threshold and (best is None or sim > best[1]):
-                best = (entry, sim)
-        return best
+        return self.consolidation_policy.find_target(list(self.entries.values()), candidate)
 
     def add_or_merge_many(
         self,
@@ -147,26 +151,25 @@ class EvolvingLibrary:
         parents: Sequence[str],
         task_id: str,
         score: float,
+        task_context: str = "",
     ) -> List[str]:
         new_or_updated: List[str] = []
         for item in candidates:
             candidate = self._make_entry(item, parents=parents, task_id=task_id, score=score)
             if not candidate.content:
                 continue
-            target = self._find_merge_target(candidate)
+            target = self.consolidation_policy.find_target(list(self.entries.values()), candidate)
             if target is not None:
                 entry, sim = target
-                entry.updated_at = time.time()
-                entry.source_task_ids = list(dict.fromkeys(entry.source_task_ids + [task_id]))
-                entry.parents = list(dict.fromkeys(entry.parents + list(parents)))
-                entry.tags = list(dict.fromkeys(entry.tags + candidate.tags))
-                # Keep the more general/longer wording, but avoid unbounded growth.
-                if len(candidate.content) > len(entry.content) and len(candidate.content) < 1200:
-                    entry.content = candidate.content
-                    entry.title = candidate.title or entry.title
-                    entry.embedding = hashed_embedding(entry.text)
-                entry.score_ema = self._ema(entry.score_ema, score)
-                entry.metadata["last_merge_similarity"] = sim
+                self.consolidation_policy.merge(
+                    entry,
+                    candidate,
+                    similarity=sim,
+                    task_id=task_id,
+                    score=score,
+                    parents=parents,
+                    task_context=task_context,
+                )
                 new_or_updated.append(entry.id)
             else:
                 self.entries[candidate.id] = candidate

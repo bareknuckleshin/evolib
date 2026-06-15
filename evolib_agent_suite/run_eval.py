@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
 from evolib_agent_suite.envs import build_env
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
+from evolib_agent_suite.evolib import AbstractionExtractor, ConsolidationConfig, EvolvingLibrary
 from evolib_agent_suite.llm import build_llm
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 from evolib_agent_suite.utils import append_jsonl, ensure_dir, load_config
@@ -22,11 +22,24 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
 
     llm = build_llm(config.get("llm", {"provider": "heuristic"}))
     env = build_env(config.get("env", {"backend": "mock"}))
+    library_cfg = config.get("library", {})
+    consolidation_cfg = config.get("consolidation", {})
     library = EvolvingLibrary(
         path=library_path,
-        similarity_merge_threshold=float(config.get("library", {}).get("similarity_merge_threshold", 0.88)),
-        retrieval_similarity_threshold=float(config.get("library", {}).get("retrieval_similarity_threshold", 0.05)),
+        similarity_merge_threshold=float(library_cfg.get("similarity_merge_threshold", 0.88)),
+        retrieval_similarity_threshold=float(library_cfg.get("retrieval_similarity_threshold", 0.05)),
         seed=int(config.get("seed", 0)),
+        consolidation_config=ConsolidationConfig(
+            enabled=bool(consolidation_cfg.get("enabled", True)),
+            similarity_threshold=float(consolidation_cfg.get("similarity_threshold", library_cfg.get("similarity_merge_threshold", 0.88))),
+            candidate_top_n=int(consolidation_cfg.get("candidate_top_n", 1)),
+            merge_strategy=str(consolidation_cfg.get("merge_strategy", "replace_if_longer")),
+            score_policy=str(consolidation_cfg.get("score_policy", "ema_score")),
+            allow_cross_type_merge=bool(consolidation_cfg.get("allow_cross_type_merge", False)),
+            merge_history_limit=int(consolidation_cfg.get("merge_history_limit", 20)),
+            ema_decay=float(consolidation_cfg.get("ema_decay", 0.85)),
+        ),
+        llm=llm,
     )
     extractor = AbstractionExtractor(llm)
 
