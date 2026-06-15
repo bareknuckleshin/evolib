@@ -17,12 +17,23 @@ agent:
   memory_size: 12
   action_hint: "Use search[query] or click[value]. For visible options/buttons/products, use click[exact visible text]."
 library:
-  path: ./runs/original_webshop_evolib/library.json
-  k_skills: 4
-  k_insights: 4
-  retrieval_similarity_threshold: 0.05
-  similarity_merge_threshold: 0.88
-  sample: true
+  storage:
+    path: ./runs/original_webshop_evolib/library.json
+  retrieval:
+    k_skills: 4
+    k_insights: 4
+    similarity_threshold: 0.05
+    sampling_strategy: weighted
+  composition:
+    max_prompt_entries: 8
+  ig:
+    scorer: self_judge
+  fig:
+    parent_credit: enabled
+  consolidation:
+    similarity_merge_threshold: 0.88
+  sampling:
+    strategy: weighted
 eval:
   split: test
   limit: 50

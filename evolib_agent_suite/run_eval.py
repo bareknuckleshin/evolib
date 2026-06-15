@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
+from evolib_agent_suite.config_utils import normalize_library_config
 from evolib_agent_suite.envs import build_env
 from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
 from evolib_agent_suite.llm import build_llm
@@ -18,14 +19,16 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     out_dir = ensure_dir(config.get("output_dir", "runs/evolib"))
     result_path = out_dir / "trajectories.jsonl"
     metrics_path = out_dir / "metrics.json"
-    library_path = config.get("library", {}).get("path", str(out_dir / "library.json"))
+    library_policy = normalize_library_config(config.get("library"), default_path=str(out_dir / "library.json"))
+    retrieval_policy = library_policy["retrieval"]
+    library_path = library_policy["storage"]["path"]
 
     llm = build_llm(config.get("llm", {"provider": "heuristic"}))
     env = build_env(config.get("env", {"backend": "mock"}))
     library = EvolvingLibrary(
         path=library_path,
-        similarity_merge_threshold=float(config.get("library", {}).get("similarity_merge_threshold", 0.88)),
-        retrieval_similarity_threshold=float(config.get("library", {}).get("retrieval_similarity_threshold", 0.05)),
+        similarity_merge_threshold=float(library_policy["consolidation"].get("similarity_merge_threshold", 0.88)),
+        retrieval_similarity_threshold=float(retrieval_policy.get("similarity_threshold", 0.05)),
         seed=int(config.get("seed", 0)),
     )
     extractor = AbstractionExtractor(llm)
@@ -43,9 +46,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     max_steps = int(eval_cfg.get("max_steps", getattr(env, "max_steps", 20)))
     split = eval_cfg.get("split", "test")
     prefer_env_reward = bool(eval_cfg.get("library_update_uses_env_reward", False))
-    k_skills = int(config.get("library", {}).get("k_skills", 4))
-    k_insights = int(config.get("library", {}).get("k_insights", 4))
-    sample_library = bool(config.get("library", {}).get("sample", True))
+    k_skills = int(retrieval_policy.get("k_skills", 4))
+    k_insights = int(retrieval_policy.get("k_insights", 4))
+    sample_library = bool(retrieval_policy.get("sample", True))
 
     metrics: Dict[str, Any] = {
         "episodes": 0,
@@ -55,6 +58,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         "progress_sum": 0.0,
         "library_size_start": len(library),
         "library_path": str(library.path),
+        "policy_config_snapshot": {"library": _jsonable(library_policy)},
         "started_at": time.time(),
     }
 

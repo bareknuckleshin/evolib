@@ -11,11 +11,16 @@ Then set AgentBoard config:
       name: EvoLibAgent
       memory_size: 100
       need_goal: True
-      library_path: ./results/evolib_agentboard_library.json
-      k_skills: 4
-      k_insights: 4
-      retrieval_similarity_threshold: 0.05
-      similarity_merge_threshold: 0.88
+      library:
+        storage:
+          path: ./results/evolib_agentboard_library.json
+        retrieval:
+          k_skills: 4
+          k_insights: 4
+          similarity_threshold: 0.05
+          sampling_strategy: weighted
+        consolidation:
+          similarity_merge_threshold: 0.88
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ from agents.base_agent import BaseAgent  # type: ignore
 from common.registry import registry  # type: ignore
 
 from evolib_agent_suite.agents import EvoLibReActAgent
+from evolib_agent_suite.config_utils import normalize_library_config
 from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
 from evolib_agent_suite.llm.base import BaseLLM
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
@@ -91,6 +97,7 @@ class EvoLibAgent(BaseAgent):
         self.need_goal = need_goal
         self.k_skills = k_skills
         self.k_insights = k_insights
+        self.sample_library = bool(kwargs.get("sample_library", True))
         self.action_hint = action_hint
         self.instruction = instruction
         self.examples = examples or []
@@ -118,7 +125,7 @@ class EvoLibAgent(BaseAgent):
             query=f"agentboard\n{goal}\n{init_obs}",
             k_skills=self.k_skills,
             k_insights=self.k_insights,
-            sample=True,
+            sample=self.sample_library,
         )
         self.core.reset(task, entries)
         self.current_task = task
@@ -186,15 +193,21 @@ class EvoLibAgent(BaseAgent):
 
     @classmethod
     def from_config(cls, llm_model: Any, config: Dict[str, Any]):
+        library_policy = normalize_library_config(
+            config.get("library", config),
+            default_path="./results/evolib_agentboard_library.json",
+        )
+        retrieval_policy = library_policy["retrieval"]
         return cls(
             llm_model=llm_model,
             memory_size=config.get("memory_size", 100),
             need_goal=config.get("need_goal", True),
-            library_path=config.get("library_path", "./results/evolib_agentboard_library.json"),
-            k_skills=config.get("k_skills", 4),
-            k_insights=config.get("k_insights", 4),
-            retrieval_similarity_threshold=config.get("retrieval_similarity_threshold", 0.05),
-            similarity_merge_threshold=config.get("similarity_merge_threshold", 0.88),
+            library_path=library_policy["storage"]["path"],
+            k_skills=int(retrieval_policy.get("k_skills", 4)),
+            k_insights=int(retrieval_policy.get("k_insights", 4)),
+            retrieval_similarity_threshold=float(retrieval_policy.get("similarity_threshold", 0.05)),
+            similarity_merge_threshold=float(library_policy["consolidation"].get("similarity_merge_threshold", 0.88)),
+            sample_library=bool(retrieval_policy.get("sample", True)),
             action_hint=config.get("action_hint", "Use one exact executable action accepted by the environment."),
             init_prompt_path=config.get("init_prompt_path"),
             instruction=config.get("instruction", ""),

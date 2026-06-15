@@ -55,6 +55,32 @@ eval:
   library_update_uses_env_reward: true
 ```
 
+
+## Experiment config example
+
+Library policy settings can be written with subsystem-scoped nested keys. The runner records the effective policy under `policy_config_snapshot.library` in `metrics.json` so runs can be reproduced later. Older flat keys still work: `library.k_skills` maps to `library.retrieval.k_skills`, and `library.sample` maps to `library.retrieval.sampling_strategy`.
+
+```yaml
+library:
+  storage:
+    path: ./runs/example/library.json
+  retrieval:
+    k_skills: 4
+    k_insights: 4
+    similarity_threshold: 0.05
+    sampling_strategy: weighted  # use topk for deterministic highest-weight retrieval
+  composition:
+    max_prompt_entries: 8
+  ig:
+    scorer: self_judge
+  fig:
+    parent_credit: enabled
+  consolidation:
+    similarity_merge_threshold: 0.88
+  sampling:
+    strategy: weighted
+```
+
 ## 3. Original WebShop
 
 External setup:
