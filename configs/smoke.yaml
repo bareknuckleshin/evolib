@@ -11,6 +11,8 @@ agent:
   action_hint: "Use one of: look, pick apple, put apple in basket."
 library:
   path: ./runs/smoke/library.json
+  storage:
+    backend: json
   k_skills: 3
   k_insights: 3
   retrieval_similarity_threshold: 0.0

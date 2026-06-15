@@ -17,6 +17,7 @@ Then set AgentBoard config:
       retrieval_similarity_threshold: 0.05
       similarity_merge_threshold: 0.88
 """
+
 from __future__ import annotations
 
 import os
@@ -32,7 +33,11 @@ from agents.base_agent import BaseAgent  # type: ignore
 from common.registry import registry  # type: ignore
 
 from evolib_agent_suite.agents import EvoLibReActAgent
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
+from evolib_agent_suite.evolib import (
+    AbstractionExtractor,
+    EvolvingLibrary,
+    build_library_storage,
+)
 from evolib_agent_suite.llm.base import BaseLLM
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 
@@ -59,6 +64,7 @@ class EvoLibAgent(BaseAgent):
         memory_size: int = 100,
         need_goal: bool = True,
         library_path: str = "./results/evolib_agentboard_library.json",
+        library_storage_backend: str = "json",
         k_skills: int = 4,
         k_insights: int = 4,
         retrieval_similarity_threshold: float = 0.05,
@@ -75,8 +81,12 @@ class EvoLibAgent(BaseAgent):
     ) -> None:
         super().__init__()
         self.bridge = AgentBoardLLMBridge(llm_model)
+        library_storage = build_library_storage(
+            library_path, {"backend": library_storage_backend}
+        )
         self.library = EvolvingLibrary(
             path=library_path,
+            storage=library_storage,
             retrieval_similarity_threshold=retrieval_similarity_threshold,
             similarity_merge_threshold=similarity_merge_threshold,
         )
@@ -130,7 +140,13 @@ class EvoLibAgent(BaseAgent):
         )
         if init_act:
             self.current_trajectory.add_step(
-                StepRecord(t=0, observation="", thought="", action=init_act, next_observation=init_obs)
+                StepRecord(
+                    t=0,
+                    observation="",
+                    thought="",
+                    action=init_act,
+                    next_observation=init_obs,
+                )
             )
 
     def run(self, init_prompt_dict: Optional[Dict[str, Any]] = None):
@@ -172,14 +188,18 @@ class EvoLibAgent(BaseAgent):
             task_id=traj.task.task_id,
             score=score,
         )
-        self.library.update_after_episode(traj.used_entry_ids, new_ids, score=score, success=None)
+        self.library.update_after_episode(
+            traj.used_entry_ids, new_ids, score=score, success=None
+        )
         self.library.save()
         self.current_trajectory = None
 
     def _combined_action_hint(self) -> str:
         hints = [self.action_hint]
         if self.check_actions:
-            hints.append(f"Use this command when needed to inspect valid actions: {self.check_actions}")
+            hints.append(
+                f"Use this command when needed to inspect valid actions: {self.check_actions}"
+            )
         if self.check_inventory:
             hints.append("Use inventory when needed to check carried objects.")
         return "\n".join(hints)
@@ -190,12 +210,20 @@ class EvoLibAgent(BaseAgent):
             llm_model=llm_model,
             memory_size=config.get("memory_size", 100),
             need_goal=config.get("need_goal", True),
-            library_path=config.get("library_path", "./results/evolib_agentboard_library.json"),
+            library_path=config.get(
+                "library_path", "./results/evolib_agentboard_library.json"
+            ),
+            library_storage_backend=config.get("library_storage_backend", "json"),
             k_skills=config.get("k_skills", 4),
             k_insights=config.get("k_insights", 4),
-            retrieval_similarity_threshold=config.get("retrieval_similarity_threshold", 0.05),
+            retrieval_similarity_threshold=config.get(
+                "retrieval_similarity_threshold", 0.05
+            ),
             similarity_merge_threshold=config.get("similarity_merge_threshold", 0.88),
-            action_hint=config.get("action_hint", "Use one exact executable action accepted by the environment."),
+            action_hint=config.get(
+                "action_hint",
+                "Use one exact executable action accepted by the environment.",
+            ),
             init_prompt_path=config.get("init_prompt_path"),
             instruction=config.get("instruction", ""),
             examples=config.get("examples", []),

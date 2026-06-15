@@ -17,6 +17,8 @@ agent:
   memory_size: 12
   action_hint: "Use search[query] or click[value]. For visible options/buttons/products, use click[exact visible text]."
 library:
+  storage:
+    backend: json
   path: ./runs/original_webshop_evolib/library.json
   k_skills: 4
   k_insights: 4
