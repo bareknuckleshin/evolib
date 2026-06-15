@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-import random
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from evolib_agent_suite.utils import clamp, cosine, hashed_embedding, weighted_sample_without_replacement
+from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, derive_seed
+from evolib_agent_suite.utils import clamp, cosine, hashed_embedding
 
 
 @dataclass
@@ -63,6 +63,7 @@ class EvolvingLibrary:
         similarity_merge_threshold: float = 0.88,
         retrieval_similarity_threshold: float = 0.05,
         seed: int = 0,
+        sampling_config: Optional[SamplingConfig] = None,
         alpha_ig: float = 1.0,
         beta_future_ig: float = 0.7,
         ema_decay: float = 0.85,
@@ -73,7 +74,12 @@ class EvolvingLibrary:
         self.alpha_ig = alpha_ig
         self.beta_future_ig = beta_future_ig
         self.ema_decay = ema_decay
-        self.rng = random.Random(seed)
+        self.seed = int(seed)
+        if sampling_config is None:
+            sampling_config = SamplingConfig(seed=self.seed)
+        elif sampling_config.seed == 0 and self.seed != 0:
+            sampling_config.seed = self.seed
+        self.sampling_policy = SamplingPolicy(sampling_config)
         self.entries: Dict[str, LibraryEntry] = {}
         self.stats: Dict[str, Any] = {"episodes": 0, "score_ema": 0.0, "score_sum": 0.0}
         self.load()
@@ -183,6 +189,8 @@ class EvolvingLibrary:
         k_skills: int = 4,
         k_insights: int = 4,
         sample: bool = True,
+        task_id: Optional[str] = None,
+        episode_id: Optional[Any] = None,
     ) -> List[LibraryEntry]:
         if not self.entries:
             return []
@@ -197,16 +205,22 @@ class EvolvingLibrary:
         if not scored:
             return []
         selected: List[LibraryEntry] = []
+        sample_meta: Dict[str, Any] = {}
         for typ, k in [("skill", k_skills), ("insight", k_insights)]:
             group = [(e, sim, w) for (e, sim, w) in scored if e.type == typ]
             group.sort(key=lambda x: (x[1] * x[2], x[1]), reverse=True)
             group = group[: max(k * 4, k)]
+            context = f"retrieval:{task_id or 'unknown-task'}:{episode_id or 'unknown-episode'}:{typ}"
+            derived_seed = derive_seed(self.sampling_policy.config.seed, context)
             if sample:
-                selected.extend(weighted_sample_without_replacement([g[0] for g in group], [g[2] for g in group], k, self.rng))
+                chosen = self.sampling_policy.sample([g[0] for g in group], [g[2] for g in group], k, self.sampling_policy.rng_for(context))
             else:
-                selected.extend([g[0] for g in group[:k]])
+                chosen = SamplingPolicy(SamplingConfig(strategy="topk", seed=derived_seed)).sample([g[0] for g in group], [g[2] for g in group], k)
+            selected.extend(chosen)
+            sample_meta[typ] = self.sampling_policy.metadata(derived_seed=derived_seed, context=context)
         for entry in selected:
             entry.uses += 1
+        self.stats["last_sampling"] = {"retrieval": sample_meta}
         return selected
 
     def update_after_episode(
@@ -215,8 +229,26 @@ class EvolvingLibrary:
         new_ids: Sequence[str],
         score: float,
         success: Optional[bool] = None,
+        task_id: Optional[str] = None,
+        episode_id: Optional[Any] = None,
     ) -> None:
         score = clamp(score)
+        baseline_context = (
+            f"baseline_bootstrap:{task_id or 'unknown-task'}:"
+            f"{episode_id or 'unknown-episode'}:{','.join(retrieved_ids)}:{len(new_ids)}"
+        )
+        baseline_seed = derive_seed(self.sampling_policy.config.seed, baseline_context)
+        baseline_entries = self.sampling_policy.sample(
+            list(self.entries.values()),
+            [entry.weight for entry in self.entries.values()],
+            min(8, len(self.entries)),
+            self.sampling_policy.rng_for(baseline_context),
+        )
+        self.stats["last_sampling"] = {
+            **dict(self.stats.get("last_sampling", {})),
+            "baseline_bootstrap": self.sampling_policy.metadata(derived_seed=baseline_seed, context=baseline_context),
+            "baseline_entry_ids": [entry.id for entry in baseline_entries],
+        }
         prev_baseline = float(self.stats.get("score_ema", 0.0))
         immediate_ig = score - prev_baseline
         positive_delta = max(0.0, immediate_ig)

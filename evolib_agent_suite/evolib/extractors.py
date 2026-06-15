@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Sequence
 
+from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, derive_seed
 from evolib_agent_suite.evolib.prompts import (
     EXTRACTION_PROMPT,
     EXTRACTION_SYSTEM_PROMPT,
@@ -15,9 +16,16 @@ from evolib_agent_suite.utils import clamp, extract_json_block
 
 
 class AbstractionExtractor:
-    def __init__(self, llm: BaseLLM, max_transcript_chars: int = 14000) -> None:
+    def __init__(
+        self,
+        llm: BaseLLM,
+        max_transcript_chars: int = 14000,
+        sampling_config: Optional[SamplingConfig] = None,
+    ) -> None:
         self.llm = llm
         self.max_transcript_chars = max_transcript_chars
+        self.sampling_policy = SamplingPolicy(sampling_config or SamplingConfig(strategy="topk"))
+        self.last_sampling_metadata: Dict[str, Any] = {}
 
     def estimate_score(self, trajectory: Trajectory, prefer_env_reward: bool = False) -> Dict[str, Any]:
         if prefer_env_reward and trajectory.final_reward is not None:
@@ -56,10 +64,10 @@ class AbstractionExtractor:
                 cleaned = [self._clean_item(x, trajectory.task.domain) for x in parsed if isinstance(x, dict)]
                 cleaned = [x for x in cleaned if x.get("content")]
                 if cleaned:
-                    return cleaned[:8]
+                    return self._select_candidates(cleaned, trajectory, 8)
         except Exception:
             pass
-        return self._heuristic_extract(trajectory, score)
+        return self._select_candidates(self._heuristic_extract(trajectory, score), trajectory, 8)
 
     def _clean_item(self, item: Dict[str, Any], domain: str) -> Dict[str, Any]:
         typ = str(item.get("type", "insight")).lower().strip()
@@ -148,3 +156,21 @@ class AbstractionExtractor:
                     }
                 )
         return items
+
+    def _select_candidates(self, candidates: List[Dict[str, Any]], trajectory: Trajectory, k: int) -> List[Dict[str, Any]]:
+        context = f"composition_candidates:{trajectory.task.task_id}"
+        derived_seed = derive_seed(self.sampling_policy.config.seed, context)
+        scores = [self._candidate_score(candidate) for candidate in candidates]
+        selected = self.sampling_policy.sample(candidates, scores, min(k, len(candidates)), self.sampling_policy.rng_for(context))
+        self.last_sampling_metadata = {
+            "composition_candidates": self.sampling_policy.metadata(derived_seed=derived_seed, context=context),
+            "candidate_count": len(candidates),
+            "selected_count": len(selected),
+        }
+        return selected
+
+    @staticmethod
+    def _candidate_score(candidate: Dict[str, Any]) -> float:
+        type_bonus = 1.1 if candidate.get("type") == "skill" else 1.0
+        content = str(candidate.get("content", ""))
+        return max(1e-6, type_bonus * min(1.0, max(0.1, len(content) / 600.0)))

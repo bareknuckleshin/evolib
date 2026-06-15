@@ -23,3 +23,6 @@ dev = ["pytest>=7.0"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["evolib_agent_suite*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

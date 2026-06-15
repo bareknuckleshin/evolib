@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
 from evolib_agent_suite.envs import build_env
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
+from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, SamplingConfig
 from evolib_agent_suite.llm import build_llm
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 from evolib_agent_suite.utils import append_jsonl, ensure_dir, load_config
@@ -22,13 +22,15 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
 
     llm = build_llm(config.get("llm", {"provider": "heuristic"}))
     env = build_env(config.get("env", {"backend": "mock"}))
+    sampling_cfg = SamplingConfig.from_dict(config.get("sampling"), default_seed=int(config.get("seed", 0)))
     library = EvolvingLibrary(
         path=library_path,
         similarity_merge_threshold=float(config.get("library", {}).get("similarity_merge_threshold", 0.88)),
         retrieval_similarity_threshold=float(config.get("library", {}).get("retrieval_similarity_threshold", 0.05)),
         seed=int(config.get("seed", 0)),
+        sampling_config=sampling_cfg,
     )
-    extractor = AbstractionExtractor(llm)
+    extractor = AbstractionExtractor(llm, sampling_config=sampling_cfg)
 
     agent_cfg = config.get("agent", {})
     agent = EvoLibReActAgent(
@@ -67,6 +69,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             k_skills=k_skills,
             k_insights=k_insights,
             sample=sample_library,
+            task_id=task.task_id,
+            episode_id=metrics["episodes"] + 1,
         )
         agent.reset(task, entries)
         traj = Trajectory(
@@ -121,6 +125,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             new_ids=new_ids,
             score=score,
             success=traj.success,
+            task_id=task.task_id,
+            episode_id=metrics["episodes"] + 1,
         )
         library.save()
 
@@ -130,6 +136,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             "new_or_updated_entry_ids": new_ids,
             "score_info": _jsonable(score_info),
             "candidate_count": len(candidates),
+            "sampling": {**dict(library.stats.get("last_sampling", {})), **extractor.last_sampling_metadata},
             "library_size": len(library),
         }
         append_jsonl(result_path, record)

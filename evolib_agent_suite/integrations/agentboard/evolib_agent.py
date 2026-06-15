@@ -32,7 +32,7 @@ from agents.base_agent import BaseAgent  # type: ignore
 from common.registry import registry  # type: ignore
 
 from evolib_agent_suite.agents import EvoLibReActAgent
-from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary
+from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, SamplingConfig
 from evolib_agent_suite.llm.base import BaseLLM
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 
@@ -71,16 +71,20 @@ class EvoLibAgent(BaseAgent):
         check_actions: Optional[str] = None,
         check_inventory: Optional[str] = None,
         use_parser: bool = True,
+        sampling: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__()
         self.bridge = AgentBoardLLMBridge(llm_model)
+        sampling_cfg = SamplingConfig.from_dict(sampling or kwargs.get("sampling"), default_seed=int(kwargs.get("seed", 0)))
         self.library = EvolvingLibrary(
             path=library_path,
             retrieval_similarity_threshold=retrieval_similarity_threshold,
             similarity_merge_threshold=similarity_merge_threshold,
+            seed=int(kwargs.get("seed", 0)),
+            sampling_config=sampling_cfg,
         )
-        self.extractor = AbstractionExtractor(self.bridge)
+        self.extractor = AbstractionExtractor(self.bridge, sampling_config=sampling_cfg)
         self.core = EvoLibReActAgent(
             llm=self.bridge,
             library=self.library,
@@ -119,6 +123,8 @@ class EvoLibAgent(BaseAgent):
             k_skills=self.k_skills,
             k_insights=self.k_insights,
             sample=True,
+            task_id=task.task_id,
+            episode_id=self.episode_counter,
         )
         self.core.reset(task, entries)
         self.current_task = task
@@ -172,7 +178,14 @@ class EvoLibAgent(BaseAgent):
             task_id=traj.task.task_id,
             score=score,
         )
-        self.library.update_after_episode(traj.used_entry_ids, new_ids, score=score, success=None)
+        self.library.update_after_episode(
+            traj.used_entry_ids,
+            new_ids,
+            score=score,
+            success=None,
+            task_id=traj.task.task_id,
+            episode_id=self.episode_counter,
+        )
         self.library.save()
         self.current_trajectory = None
 
@@ -203,4 +216,6 @@ class EvoLibAgent(BaseAgent):
             check_actions=config.get("check_actions"),
             check_inventory=config.get("check_inventory"),
             use_parser=config.get("use_parser", True),
+            sampling=config.get("sampling"),
+            seed=config.get("seed", 0),
         )
