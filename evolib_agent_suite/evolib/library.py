@@ -14,6 +14,9 @@ from evolib_agent_suite.evolib.sampling import SamplingConfig, SamplingPolicy, S
 from evolib_agent_suite.evolib.storage import JsonLibraryStorage, LibraryStorage, SQLiteLibraryStorage
 
 
+CURRENT_SCHEMA_VERSION = 2
+
+
 @dataclass
 class LibraryEntry:
     id: str
@@ -127,7 +130,7 @@ class EvolvingLibrary:
     ) -> None:
         self.path = Path(path)
         self.storage = storage or self._build_storage(self.path, storage_backend)
-        self.schema_version = 2
+        self.schema_version = CURRENT_SCHEMA_VERSION
         self.similarity_merge_threshold = similarity_merge_threshold
         self.retrieval_similarity_threshold = retrieval_similarity_threshold
         self.alpha_ig = alpha_ig
@@ -174,8 +177,9 @@ class EvolvingLibrary:
         data = self.storage.load()
         if not data:
             return
-        self.schema_version = int(data.get("schema_version", 1))
-        self.stats = data.get("stats", self.stats)
+        loaded_schema_version = int(data.get("schema_version", 1))
+        self.stats = dict(data.get("stats", self.stats))
+        self.schema_version = max(CURRENT_SCHEMA_VERSION, loaded_schema_version)
         self.entries = {e["id"]: LibraryEntry.from_dict(e) for e in data.get("entries", [])}
         self.lineage_edges = [LineageEdge.from_dict(e) for e in data.get("lineage_edges", [])]
         self.fig_events = list(data.get("ig_events", data.get("fig_events", [])))
@@ -188,7 +192,7 @@ class EvolvingLibrary:
 
     def save(self) -> None:
         payload = {
-            "schema_version": self.schema_version,
+            "schema_version": CURRENT_SCHEMA_VERSION,
             "stats": self.stats,
             "entries": [entry.to_dict() for entry in self.entries.values()],
             "lineage_edges": [edge.to_dict() for edge in self.lineage_edges],
