@@ -265,7 +265,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
                     "score_estimate": score,
                     "library_size": len(library),
                     "ig_baseline_value": ig_info["baseline"],
-                "baseline": ig_info["baseline"],
+                    "baseline": ig_info["baseline"],
                     "immediate_ig": ig_info["immediate_ig"],
                     "baseline_strategy": ig_info["baseline_strategy"],
                 },
