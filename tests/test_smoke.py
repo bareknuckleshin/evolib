@@ -17,14 +17,9 @@ def test_smoke_run(tmp_path):
     assert payload["schema_version"] == 1
     assert payload["entries"]
     assert "ig_events" in payload
-    assert "policy_snapshots" in payload
     assert "ig_events" not in payload["stats"]
 
-    record = json.loads(
-        (Path(cfg["output_dir"]) / "trajectories.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()[0]
-    )
+    record = json.loads((Path(cfg["output_dir"]) / "trajectories.jsonl").read_text(encoding="utf-8").splitlines()[0])
     evolib = record["evolib"]
     assert "retrieval_candidate_count" in evolib
     assert "selected_entry_ids" in evolib

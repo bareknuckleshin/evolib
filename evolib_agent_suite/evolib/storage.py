@@ -7,21 +7,15 @@ from typing import Any, Dict, Mapping, Protocol
 
 
 class LibraryStorage(Protocol):
-    """Storage adapter protocol for serialized EvoLib library payloads."""
-
     path: Path
     backend: str
 
-    def load(self) -> Dict[str, Any]:
-        """Load a serialized library payload, or an empty payload when absent."""
+    def load(self) -> Dict[str, Any]: ...
 
-    def save(self, payload: Dict[str, Any]) -> None:
-        """Persist a serialized library payload."""
+    def save(self, payload: Dict[str, Any]) -> None: ...
 
 
 class JsonLibraryStorage:
-    """Backward-compatible JSON storage for the existing library.json format."""
-
     backend = "json"
 
     def __init__(self, path: str | Path) -> None:
@@ -34,20 +28,10 @@ class JsonLibraryStorage:
 
     def save(self, payload: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class SQLiteLibraryStorage:
-    """Experimental SQLite storage for EvoLib library payloads.
-
-    This adapter intentionally persists the same serialized payload contract as
-    JsonLibraryStorage. That keeps the first SQLite backend backward-compatible at
-    the EvoLib boundary while leaving room to normalize selected event streams in
-    later experiments.
-    """
-
     backend = "sqlite"
 
     def __init__(self, path: str | Path) -> None:
@@ -58,12 +42,8 @@ class SQLiteLibraryStorage:
             return {}
         with sqlite3.connect(self.path) as conn:
             self._ensure_schema(conn)
-            row = conn.execute(
-                "SELECT payload FROM library_state WHERE id = 1"
-            ).fetchone()
-        if row is None:
-            return {}
-        return json.loads(row[0])
+            row = conn.execute("SELECT payload FROM library_state WHERE id = 1").fetchone()
+        return json.loads(row[0]) if row else {}
 
     def save(self, payload: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,32 +54,26 @@ class SQLiteLibraryStorage:
                 """
                 INSERT INTO library_state (id, payload, updated_at)
                 VALUES (1, ?, strftime('%s', 'now'))
-                ON CONFLICT(id) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
+                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
                 """,
                 (serialized,),
             )
             conn.commit()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS library_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 payload TEXT NOT NULL,
                 updated_at REAL NOT NULL
             )
-            """)
+            """
+        )
 
 
-def build_library_storage(
-    path: str | Path,
-    storage_config: Mapping[str, Any] | None = None,
-) -> LibraryStorage:
-    """Build the configured storage backend, defaulting to JSON."""
-
-    cfg = storage_config or {}
-    backend = str(cfg.get("backend", "json")).lower()
+def build_library_storage(path: str | Path, config: Mapping[str, Any] | None = None) -> LibraryStorage:
+    backend = str((config or {}).get("backend", "json")).lower()
     if backend == "json":
         return JsonLibraryStorage(path)
     if backend == "sqlite":

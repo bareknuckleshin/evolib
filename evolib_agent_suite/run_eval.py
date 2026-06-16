@@ -8,11 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
 from evolib_agent_suite.envs import build_env
-from evolib_agent_suite.evolib import (
-    AbstractionExtractor,
-    EvolvingLibrary,
-    build_library_storage,
-)
+from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, build_library_storage
 from evolib_agent_suite.llm import build_llm
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
 from evolib_agent_suite.utils import append_jsonl, ensure_dir, load_config
@@ -34,12 +30,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     library = EvolvingLibrary(
         path=library_path,
         storage=storage,
-        similarity_merge_threshold=float(
-            library_cfg.get("similarity_merge_threshold", 0.88)
-        ),
-        retrieval_similarity_threshold=float(
-            library_cfg.get("retrieval_similarity_threshold", 0.05)
-        ),
+        similarity_merge_threshold=float(library_cfg.get("similarity_merge_threshold", 0.88)),
+        retrieval_similarity_threshold=float(library_cfg.get("retrieval_similarity_threshold", 0.05)),
         seed=int(config.get("seed", 0)),
     )
     extractor = AbstractionExtractor(llm)
@@ -60,26 +52,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     k_skills = int(library_cfg.get("k_skills", 4))
     k_insights = int(library_cfg.get("k_insights", 4))
     sample_library = bool(library_cfg.get("sample", True))
-    retrieval_policy_config = {
-        "k_skills": k_skills,
-        "k_insights": k_insights,
-        "sample": sample_library,
-        "similarity_threshold": library.retrieval_similarity_threshold,
-    }
-    composition_policy_config = {
-        "similarity_merge_threshold": library.similarity_merge_threshold,
-        "alpha_ig": library.alpha_ig,
-        "beta_future_ig": library.beta_future_ig,
-        "ema_decay": library.ema_decay,
-    }
-    library.record_policy_snapshot(
-        {
-            "retrieval_policy_config": retrieval_policy_config,
-            "composition_policy_config": composition_policy_config,
-            "storage_backend": storage.backend,
-            "timestamp": time.time(),
-        }
-    )
+    retrieval_policy_config = {"k_skills": k_skills, "k_insights": k_insights, "sample": sample_library, "similarity_threshold": library.retrieval_similarity_threshold}
+    composition_policy_config = {"similarity_merge_threshold": library.similarity_merge_threshold, "alpha_ig": library.alpha_ig, "beta_future_ig": library.beta_future_ig, "ema_decay": library.ema_decay}
+    library.policy_snapshots.append({"retrieval_policy_config": retrieval_policy_config, "composition_policy_config": composition_policy_config, "storage_backend": storage.backend, "timestamp": time.time()})
 
     metrics: Dict[str, Any] = {
         "episodes": 0,
@@ -160,25 +135,14 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             score=score,
             success=traj.success,
         )
-        retrieval_event = {
-            "task_id": task.task_id,
-            "candidate_count": retrieval_trace.get("candidate_count", 0),
-            "selected_entry_ids": retrieval_trace.get(
-                "selected_entry_ids", traj.used_entry_ids
-            ),
-            "retrieval_policy_config": retrieval_policy_config,
-            "timestamp": time.time(),
-        }
-        library.record_retrieval_event(retrieval_event)
+        library.retrieval_events.append({"task_id": task.task_id, "candidate_count": retrieval_trace.get("candidate_count", 0), "selected_entry_ids": retrieval_trace.get("selected_entry_ids", traj.used_entry_ids), "retrieval_policy_config": retrieval_policy_config, "timestamp": time.time()})
         library.save()
 
         record = traj.to_dict()
         record["evolib"] = {
             "retrieval_candidate_count": retrieval_trace.get("candidate_count", 0),
             "retrieved_entry_ids": traj.used_entry_ids,
-            "selected_entry_ids": retrieval_trace.get(
-                "selected_entry_ids", traj.used_entry_ids
-            ),
+            "selected_entry_ids": retrieval_trace.get("selected_entry_ids", traj.used_entry_ids),
             "retrieval_policy_config": retrieval_policy_config,
             "composition_policy_config": composition_policy_config,
             "ig_baseline_value": ig_event["baseline_value"],
@@ -198,9 +162,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         metrics["score_estimate_sum"] += score
         metrics["progress_sum"] += float(traj.progress or 0.0)
         metrics.update(_summarize(metrics, len(library)))
-        metrics_path.write_text(
-            json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
         print(
             json.dumps(
                 {
@@ -219,9 +181,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     library.save()
     metrics["finished_at"] = time.time()
     metrics.update(_summarize(metrics, len(library)))
-    metrics_path.write_text(
-        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     return metrics
 
 
@@ -251,9 +211,7 @@ def _jsonable(obj: Any) -> Any:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run EvoLib agent evaluation.")
     parser.add_argument("--config", required=True, help="Path to YAML/JSON config.")
-    parser.add_argument(
-        "--limit", type=int, default=None, help="Override number of tasks."
-    )
+    parser.add_argument("--limit", type=int, default=None, help="Override number of tasks.")
     args = parser.parse_args()
     cfg = load_config(args.config)
     metrics = run(cfg, limit=args.limit)

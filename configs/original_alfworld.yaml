@@ -17,8 +17,6 @@ agent:
   memory_size: 20
   action_hint: "Use one exact admissible ALFWorld command. Prefer admissible commands shown by the environment."
 library:
-  storage:
-    backend: json
   path: ./runs/original_alfworld_evolib/library.json
   k_skills: 5
   k_insights: 5

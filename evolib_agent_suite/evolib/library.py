@@ -8,20 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from evolib_agent_suite.evolib.storage import JsonLibraryStorage, LibraryStorage
-from evolib_agent_suite.utils import (
-    clamp,
-    cosine,
-    hashed_embedding,
-    weighted_sample_without_replacement,
-)
+from evolib_agent_suite.utils import clamp, cosine, hashed_embedding, weighted_sample_without_replacement
 
-OPTIONAL_EVENT_FIELDS = (
-    "lineage_edges",
-    "merge_events",
-    "ig_events",
-    "retrieval_events",
-    "policy_snapshots",
-)
+
+OPTIONAL_EVENT_FIELDS = ("lineage_edges", "merge_events", "ig_events", "retrieval_events", "policy_snapshots")
 
 
 @dataclass
@@ -47,9 +37,7 @@ class LibraryEntry:
 
     @property
     def text(self) -> str:
-        return (
-            f"{self.type}: {self.title}\n{self.content}\nTags: {', '.join(self.tags)}"
-        )
+        return f"{self.type}: {self.title}\n{self.content}\nTags: {', '.join(self.tags)}"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -105,10 +93,10 @@ class EvolvingLibrary:
         if not data:
             return
         self.stats = data.get("stats", self.stats)
-        self.entries = {
-            e["id"]: LibraryEntry.from_dict(e) for e in data.get("entries", [])
-        }
-        self._load_optional_event_fields(data)
+        self.entries = {e["id"]: LibraryEntry.from_dict(e) for e in data.get("entries", [])}
+        for name in OPTIONAL_EVENT_FIELDS:
+            values = data.get(name, self.stats.pop(name, []))
+            setattr(self, name, list(values or []))
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,25 +105,11 @@ class EvolvingLibrary:
             "stats": self.stats,
             "entries": [entry.to_dict() for entry in self.entries.values()],
         }
-        for field_name in OPTIONAL_EVENT_FIELDS:
-            values = getattr(self, field_name)
+        for name in OPTIONAL_EVENT_FIELDS:
+            values = getattr(self, name)
             if values:
-                payload[field_name] = values
+                payload[name] = values
         self.storage.save(payload)
-
-    def _load_optional_event_fields(self, data: Dict[str, Any]) -> None:
-        # New schema keeps event streams top-level. The stats fallback migrates
-        # payloads created by older development versions without preserving the
-        # events inside stats, so the canonical stats object stays compact.
-        for field_name in OPTIONAL_EVENT_FIELDS:
-            values = data.get(field_name, self.stats.pop(field_name, []))
-            setattr(self, field_name, list(values or []))
-
-    def record_retrieval_event(self, event: Dict[str, Any]) -> None:
-        self.retrieval_events.append(event)
-
-    def record_policy_snapshot(self, snapshot: Dict[str, Any]) -> None:
-        self.policy_snapshots.append(snapshot)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -175,17 +149,13 @@ class EvolvingLibrary:
             source_task_ids=[task_id],
         )
 
-    def _find_merge_target(
-        self, candidate: LibraryEntry
-    ) -> Optional[Tuple[LibraryEntry, float]]:
+    def _find_merge_target(self, candidate: LibraryEntry) -> Optional[Tuple[LibraryEntry, float]]:
         best: Optional[Tuple[LibraryEntry, float]] = None
         for entry in self.entries.values():
             if entry.type != candidate.type:
                 continue
             sim = cosine(candidate.embedding, entry.embedding)
-            if sim >= self.similarity_merge_threshold and (
-                best is None or sim > best[1]
-            ):
+            if sim >= self.similarity_merge_threshold and (best is None or sim > best[1]):
                 best = (entry, sim)
         return best
 
@@ -198,51 +168,29 @@ class EvolvingLibrary:
     ) -> List[str]:
         new_or_updated: List[str] = []
         for item in candidates:
-            candidate = self._make_entry(
-                item, parents=parents, task_id=task_id, score=score
-            )
+            candidate = self._make_entry(item, parents=parents, task_id=task_id, score=score)
             if not candidate.content:
                 continue
             target = self._find_merge_target(candidate)
             if target is not None:
                 entry, sim = target
                 entry.updated_at = time.time()
-                entry.source_task_ids = list(
-                    dict.fromkeys(entry.source_task_ids + [task_id])
-                )
+                entry.source_task_ids = list(dict.fromkeys(entry.source_task_ids + [task_id]))
                 entry.parents = list(dict.fromkeys(entry.parents + list(parents)))
                 entry.tags = list(dict.fromkeys(entry.tags + candidate.tags))
                 # Keep the more general/longer wording, but avoid unbounded growth.
-                if (
-                    len(candidate.content) > len(entry.content)
-                    and len(candidate.content) < 1200
-                ):
+                if len(candidate.content) > len(entry.content) and len(candidate.content) < 1200:
                     entry.content = candidate.content
                     entry.title = candidate.title or entry.title
                     entry.embedding = hashed_embedding(entry.text)
                 entry.score_ema = self._ema(entry.score_ema, score)
                 entry.metadata["last_merge_similarity"] = sim
-                self.merge_events.append(
-                    {
-                        "task_id": task_id,
-                        "target_entry_id": entry.id,
-                        "candidate_title": candidate.title,
-                        "similarity": sim,
-                        "timestamp": time.time(),
-                    }
-                )
+                self.merge_events.append({"task_id": task_id, "target_entry_id": entry.id, "candidate_title": candidate.title, "similarity": sim, "timestamp": time.time()})
                 new_or_updated.append(entry.id)
             else:
                 self.entries[candidate.id] = candidate
                 for parent_id in candidate.parents:
-                    self.lineage_edges.append(
-                        {
-                            "parent_id": parent_id,
-                            "child_id": candidate.id,
-                            "task_id": task_id,
-                            "timestamp": time.time(),
-                        }
-                    )
+                    self.lineage_edges.append({"parent_id": parent_id, "child_id": candidate.id, "task_id": task_id, "timestamp": time.time()})
                     parent = self.entries.get(parent_id)
                     if parent and candidate.id not in parent.children:
                         parent.children.append(candidate.id)
@@ -281,11 +229,7 @@ class EvolvingLibrary:
             group.sort(key=lambda x: (x[1] * x[2], x[1]), reverse=True)
             group = group[: max(k * 4, k)]
             if sample:
-                selected.extend(
-                    weighted_sample_without_replacement(
-                        [g[0] for g in group], [g[2] for g in group], k, self.rng
-                    )
-                )
+                selected.extend(weighted_sample_without_replacement([g[0] for g in group], [g[2] for g in group], k, self.rng))
             else:
                 selected.extend([g[0] for g in group[:k]])
         for entry in selected:
@@ -305,7 +249,6 @@ class EvolvingLibrary:
         prev_baseline = float(self.stats.get("score_ema", 0.0))
         immediate_ig = score - prev_baseline
         positive_delta = max(0.0, immediate_ig)
-
         propagated_fig_credits: Dict[str, float] = {}
 
         for entry_id in new_ids:
@@ -333,9 +276,7 @@ class EvolvingLibrary:
                 if not entry:
                     continue
                 credit = positive_delta * discount
-                propagated_fig_credits[entry_id] = (
-                    propagated_fig_credits.get(entry_id, 0.0) + credit
-                )
+                propagated_fig_credits[entry_id] = propagated_fig_credits.get(entry_id, 0.0) + credit
                 entry.future_ig_ema = self._ema(entry.future_ig_ema, credit)
                 entry.score_ema = self._ema(entry.score_ema, score)
                 if success:
@@ -368,17 +309,11 @@ class EvolvingLibrary:
     def _recompute_weight(self, entry: LibraryEntry) -> None:
         usage_bonus = min(0.5, 0.03 * entry.uses)
         win_bonus = min(0.5, 0.05 * entry.wins)
-        value = (
-            1.0
-            + self.alpha_ig * entry.ig_ema
-            + self.beta_future_ig * entry.future_ig_ema
-        )
+        value = 1.0 + self.alpha_ig * entry.ig_ema + self.beta_future_ig * entry.future_ig_ema
         entry.weight = max(0.05, value + usage_bonus + win_bonus)
         entry.updated_at = time.time()
 
-    def format_for_prompt(
-        self, entries: Sequence[LibraryEntry], max_chars: int = 5000
-    ) -> str:
+    def format_for_prompt(self, entries: Sequence[LibraryEntry], max_chars: int = 5000) -> str:
         if not entries:
             return "No prior skills or insights are available yet."
         chunks: List[str] = []
