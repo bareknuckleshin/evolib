@@ -1,10 +1,30 @@
 seed: 0
 output_dir: ./runs/original_webshop_evolib
 llm:
-  provider: openai_compatible
-  model: gpt-4o-mini
+  provider: azure_openai
+  endpoint_url: https://az-ea-s-cent-us-resource.cognitiveservices.azure.com/openai/v1/chat/completions
+  # Prefer AZURE_OPENAI_API_KEY in the environment instead of committing secrets.
+  api_key: ""
+  model: gpt-5.4
   temperature: 0.0
+  top_p: 1.0
   max_tokens: 512
+  timeout_seconds: 120
+  retries: 3
+  use_proxy: true
+  proxy_url: http://70.10.15.10:8080
+  verify_ssl: false
+embedding:
+  provider: azure_openai
+  endpoint_url: https://az-ea.openai.azure.com/openai/deployments/text-embedding-ada-002/embeddings?api-version=2023-05-15
+  # Prefer AZURE_OPENAI_EMBEDDINGS_API_KEY in the environment instead of committing secrets.
+  api_key: ""
+  model: text-embedding-ada-002
+  timeout_seconds: 120
+  retries: 3
+  use_proxy: true
+  proxy_url: http://70.10.15.10:8080
+  verify_ssl: false
 env:
   backend: original_webshop
   kwargs:

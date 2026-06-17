@@ -68,14 +68,15 @@ conda activate webshop
 export PYTHONPATH=/path/to/webshop:$PYTHONPATH
 ```
 
-Run with the default OpenAI-compatible LLM config:
+Run with the default Azure OpenAI LLM/embedding config:
 
 ```bash
-export OPENAI_API_KEY=...
+export AZURE_OPENAI_API_KEY=...
+export AZURE_OPENAI_EMBEDDINGS_API_KEY=...
 python -m evolib_agent_suite.run_eval --config configs/original_webshop.yaml --limit 20
 ```
 
-`OPENAI_API_KEY` is consumed by `evolib_agent_suite`'s LLM provider, not by the WebShop repository. The default `configs/original_webshop.yaml` uses `llm.provider: openai_compatible` and does not configure a remote embedding provider, so embeddings fall back to the local hashed embedding implementation and do not need an embedding API key.
+The Azure OpenAI keys are consumed by `evolib_agent_suite`'s LLM and embedding providers, not by the WebShop repository. The default `configs/original_webshop.yaml` is set up for Azure OpenAI chat and embeddings; set `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_EMBEDDINGS_API_KEY` before running, or edit the `llm`/`embedding` sections to match your endpoint.
 
 Azure OpenAI chat and embedding endpoints are also supported. Use `provider: azure_openai` for both `llm` and `embedding`; `use_proxy` controls whether `proxy_url` is applied. A complete runnable template is available at `configs/azure_openai.yaml`.
 
