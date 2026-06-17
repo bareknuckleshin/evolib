@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from evolib_agent_suite.evolib.consolidation import ConsolidationConfig, ConsolidationPolicy, LLMMerger
 from evolib_agent_suite.utils import clamp, cosine, hashed_embedding
@@ -127,8 +127,10 @@ class EvolvingLibrary:
         ig_config: Optional[Union[IGConfig, Dict[str, Any]]] = None,
         storage: Optional[LibraryStorage] = None,
         storage_backend: str = "json",
+        embedding_fn: Optional[Callable[[str], List[float]]] = None,
     ) -> None:
         self.path = Path(path)
+        self.embedding_fn = embedding_fn or hashed_embedding
         self.storage = storage or self._build_storage(self.path, storage_backend)
         self.schema_version = CURRENT_SCHEMA_VERSION
         self.similarity_merge_threshold = similarity_merge_threshold
@@ -236,7 +238,7 @@ class EvolvingLibrary:
             content=content,
             tags=list(tags),
             weight=1.0,
-            embedding=hashed_embedding(text),
+            embedding=self._embed(text),
             parents=list(dict.fromkeys(parents)),
             score_ema=score,
             source_task_ids=[task_id],
@@ -244,6 +246,9 @@ class EvolvingLibrary:
 
     def _find_merge_target(self, candidate: LibraryEntry) -> Optional[Tuple[LibraryEntry, float]]:
         return self.consolidation_policy.find_target(list(self.entries.values()), candidate)
+
+    def _embed(self, text: str) -> List[float]:
+        return list(self.embedding_fn(text))
 
     def _record_lineage_edges(
         self,
@@ -298,7 +303,7 @@ class EvolvingLibrary:
                 if len(candidate.content) > len(entry.content) and len(candidate.content) < 1200:
                     entry.content = candidate.content
                     entry.title = candidate.title or entry.title
-                    entry.embedding = hashed_embedding(entry.text)
+                    entry.embedding = self._embed(entry.text)
                 entry.score_ema = self._ema(entry.score_ema, score)
                 entry.metadata["last_merge_similarity"] = sim
                 self._record_lineage_edges(
@@ -318,6 +323,7 @@ class EvolvingLibrary:
                     parents=parents,
                     task_context=task_context,
                 )
+                entry.embedding = self._embed(entry.text)
                 decision = {
                     "action": "merge",
                     "task_id": task_id,
@@ -394,7 +400,7 @@ class EvolvingLibrary:
         if not self.entries:
             self.last_retrieval_event = {"candidate_count": 0, "selected_entry_ids": [], "config": self._config_dict(config)}
             return []
-        q_emb = hashed_embedding(query)
+        q_emb = self._embed(query)
         scored: List[Tuple[LibraryEntry, float, float, float]] = []
         for entry in self.entries.values():
             sim = cosine(q_emb, entry.embedding)

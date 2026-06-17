@@ -83,7 +83,7 @@ def hashed_embedding(text: str, dim: int = 384) -> List[float]:
 
 
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    if not a or not b:
+    if not a or not b or len(a) != len(b):
         return 0.0
     va = np.asarray(a, dtype=np.float32)
     vb = np.asarray(b, dtype=np.float32)
