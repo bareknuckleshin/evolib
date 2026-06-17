@@ -75,6 +75,27 @@ export OPENAI_API_KEY=...
 python -m evolib_agent_suite.run_eval --config configs/original_webshop.yaml --limit 20
 ```
 
+Azure OpenAI chat and embedding endpoints are also supported. Use `provider: azure_openai` for both `llm` and `embedding`; `use_proxy` controls whether `proxy_url` is applied. API keys can be supplied in config or via `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_EMBEDDINGS_API_KEY`.
+
+```yaml
+llm:
+  provider: azure_openai
+  endpoint_url: https://az-ea-s-cent-us-resource.cognitiveservices.azure.com/openai/v1/chat/completions
+  model: gpt-5.4
+  use_proxy: true
+  proxy_url: http://70.10.15.10:8080
+  verify_ssl: false
+embedding:
+  provider: azure_openai
+  endpoint_url: https://az-ea.openai.azure.com/openai/deployments/text-embedding-ada-002/embeddings?api-version=2023-05-15
+  model: text-embedding-ada-002
+  use_proxy: true
+  proxy_url: http://70.10.15.10:8080
+  verify_ssl: false
+```
+
+A complete runnable template is available at `configs/azure_openai.yaml`.
+
 The adapter uses:
 
 ```python

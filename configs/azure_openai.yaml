@@ -1,0 +1,44 @@
+seed: 0
+output_dir: ./runs/azure_openai_evolib
+llm:
+  provider: azure_openai
+  endpoint_url: https://az-ea-s-cent-us-resource.cognitiveservices.azure.com/openai/v1/chat/completions
+  api_key: ""
+  model: gpt-5.4
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 512
+  timeout_seconds: 120
+  retries: 3
+  use_proxy: false
+  proxy_url: http://70.10.15.10:8080
+  verify_ssl: false
+embedding:
+  provider: azure_openai
+  endpoint_url: https://az-ea.openai.azure.com/openai/deployments/text-embedding-ada-002/embeddings?api-version=2023-05-15
+  api_key: ""
+  model: text-embedding-ada-002
+  timeout_seconds: 120
+  retries: 3
+  use_proxy: false
+  proxy_url: http://70.10.15.10:8080
+  verify_ssl: false
+env:
+  backend: mock
+  kwargs:
+    max_steps: 5
+agent:
+  memory_size: 8
+  action_hint: "Use one of: look, pick apple, put apple in basket."
+library:
+  path: ./runs/azure_openai_evolib/library.json
+  k_skills: 3
+  k_insights: 3
+  retrieval_similarity_threshold: 0.0
+  similarity_merge_threshold: 0.86
+  sample: true
+eval:
+  split: test
+  limit: 3
+  max_steps: 5
+  library_update_uses_env_reward: false

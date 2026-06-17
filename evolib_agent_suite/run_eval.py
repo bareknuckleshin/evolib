@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from evolib_agent_suite.agents import EvoLibReActAgent
+from evolib_agent_suite.embeddings import build_embedding_function
 from evolib_agent_suite.envs import build_env
 from evolib_agent_suite.evolib import AbstractionExtractor, CompositionConfig, ConsolidationConfig, EvolvingLibrary, IGConfig, RetrievalConfig
 from evolib_agent_suite.llm import build_llm
@@ -26,6 +27,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     llm = build_llm(config.get("llm", {"provider": "heuristic"}))
     env = build_env(config.get("env", {"backend": "mock"}))
     library_cfg = config.get("library", {})
+    embedding_cfg = config.get("embedding", library_cfg.get("embedding", {}))
+    embedding_fn = build_embedding_function(embedding_cfg)
     consolidation_cfg = config.get("consolidation", {})
     ig_cfg = IGConfig(**library_cfg.get("ig", {}))
     library = EvolvingLibrary(
@@ -47,6 +50,7 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         ema_decay=ig_cfg.ema_decay,
         ig_config=ig_cfg,
         storage_backend=library_storage_backend,
+        embedding_fn=embedding_fn,
     )
     extractor = AbstractionExtractor(llm)
 
