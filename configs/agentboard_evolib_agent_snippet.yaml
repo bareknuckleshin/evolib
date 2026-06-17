@@ -1,4 +1,5 @@
 # Merge this into AgentBoard/eval_configs/main_results_all_tasks.yaml after installing the plugin.
+# This snippet is intended for the official AgentBoard WebShop task loop.
 agent:
   name: EvoLibAgent
   memory_size: 100
@@ -8,11 +9,20 @@ agent:
   k_insights: 4
   retrieval_similarity_threshold: 0.05
   similarity_merge_threshold: 0.88
-  action_hint: "Use one exact executable action accepted by the current AgentBoard environment."
+  action_hint: "Use exact AgentBoard WebShop actions: search[query] or click[visible text]."
 
+# Required AgentBoard WebShop config shape:
+# env:
+#   webshop:
+#     web_url: http://127.0.0.1:3000
+#     label_path: ${PROJECT_PATH}/data/webshop/test.jsonl
+#
+# Start the WebShop server before evaluation:
+# cd agentboard/environment/WebShop && bash ./run_dev.sh
+#
 # Then run AgentBoard normally, for example:
 # python agentboard/eval_main.py \
 #   --cfg-path eval_configs/main_results_all_tasks.yaml \
-#   --tasks alfworld,webshop \
+#   --tasks webshop \
 #   --model gpt-3.5-turbo-0613 \
 #   --log_path ./results/evolib_agentboard

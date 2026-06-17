@@ -26,21 +26,28 @@ Then set AgentBoard config:
 from __future__ import annotations
 
 import os
+import re
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 ROOT = os.environ.get("EVOLIB_PROJECT_ROOT")
 if ROOT and ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from agents.base_agent import BaseAgent  # type: ignore
+from agents.vanilla_agent import VanillaAgent  # type: ignore
 from common.registry import registry  # type: ignore
 
 from evolib_agent_suite.agents import EvoLibReActAgent
 from evolib_agent_suite.evolib import AbstractionExtractor, EvolvingLibrary, RetrievalConfig
 from evolib_agent_suite.llm.base import BaseLLM
 from evolib_agent_suite.schema import StepRecord, TaskSpec, Trajectory
+
+
+WEBSHOP_ACTION_HINT = (
+    "For AgentBoard WebShop, return exactly one executable action. Use search[query] on the "
+    "search page. Use click[value] only for visible bracketed products, options, navigation "
+    "controls, and the Buy Now button. Preserve the exact visible text inside click[...]."
+)
 
 
 class AgentBoardLLMBridge(BaseLLM):
@@ -52,13 +59,12 @@ class AgentBoardLLMBridge(BaseLLM):
     def generate(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> str:
         success, text = self.llm_model.generate(system_prompt, user_prompt)
         if not success:
-            # Still return text if AgentBoard provides it; otherwise use a safe fallback.
             return text or "Action: look"
         return text
 
 
 @registry.register_agent("EvoLibAgent")
-class EvoLibAgent(BaseAgent):
+class EvoLibAgent(VanillaAgent):
     def __init__(
         self,
         llm_model: Any,
@@ -85,7 +91,18 @@ class EvoLibAgent(BaseAgent):
         use_parser: bool = True,
         **kwargs: Any,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            llm_model=llm_model,
+            memory_size=memory_size,
+            examples=examples or [],
+            instruction=instruction,
+            init_prompt_path=init_prompt_path,
+            system_message=system_message,
+            need_goal=need_goal,
+            check_actions=check_actions,
+            check_inventory=check_inventory,
+            use_parser=use_parser,
+        )
         self.bridge = AgentBoardLLMBridge(llm_model)
         self.library = EvolvingLibrary(
             path=library_path,
@@ -99,8 +116,6 @@ class EvoLibAgent(BaseAgent):
             memory_size=memory_size,
             action_hint=action_hint,
         )
-        self.memory_size = memory_size
-        self.need_goal = need_goal
         self.k_skills = k_skills
         self.k_insights = k_insights
         self.retrieval_config = RetrievalConfig(
@@ -115,30 +130,26 @@ class EvoLibAgent(BaseAgent):
             similarity_alpha=similarity_alpha,
         )
         self.action_hint = action_hint
-        self.instruction = instruction
-        self.examples = examples or []
-        self.system_message = system_message
-        self.check_actions = check_actions
-        self.check_inventory = check_inventory
-        self.use_parser = use_parser
         self.current_task: Optional[TaskSpec] = None
         self.current_obs: str = ""
         self.current_trajectory: Optional[Trajectory] = None
+        self.current_entry_ids: List[str] = []
         self.last_thought: str = ""
         self.last_raw: str = ""
         self.episode_counter = 0
 
     def reset(self, goal: str, init_obs: str, init_act: Optional[str] = None):
         self._finalize_previous_episode()
+        super().reset(goal=goal, init_obs=init_obs, init_act=init_act)
         self.episode_counter += 1
         task = TaskSpec(
             task_id=f"agentboard-{self.episode_counter}",
             goal=goal if self.need_goal else init_obs,
-            domain="agentboard",
+            domain="agentboard_webshop",
             action_hint=self._combined_action_hint(),
         )
         entries = self.library.retrieve(
-            query=f"agentboard\n{goal}\n{init_obs}",
+            query=f"agentboard webshop\n{goal}\n{init_obs}",
             k_skills=self.k_skills,
             k_insights=self.k_insights,
             sampling_strategy=self.retrieval_config.sampling_strategy,
@@ -152,10 +163,11 @@ class EvoLibAgent(BaseAgent):
         self.core.reset(task, entries)
         self.current_task = task
         self.current_obs = init_obs
+        self.current_entry_ids = [e.id for e in entries]
         self.current_trajectory = Trajectory(
             task=task,
             initial_observation=init_obs,
-            used_entry_ids=[e.id for e in entries],
+            used_entry_ids=list(self.current_entry_ids),
         )
         if init_act:
             self.current_trajectory.add_step(
@@ -168,10 +180,14 @@ class EvoLibAgent(BaseAgent):
         decision = self.core.act(self.current_obs, available_actions=None)
         self.last_thought = decision.thought
         self.last_raw = decision.raw_response
-        return True, decision.action
+        action = self._clean_action(decision.action or decision.raw_response)
+        self.log_example_prompt(self._example_prompt_snapshot(action))
+        return True, action
 
     def update(self, action: str, state: str):
+        super().update(action=action, state=state)
         if self.current_trajectory is None:
+            self.current_obs = state
             return
         step = StepRecord(
             t=len(self.current_trajectory.steps),
@@ -206,12 +222,36 @@ class EvoLibAgent(BaseAgent):
         self.current_trajectory = None
 
     def _combined_action_hint(self) -> str:
-        hints = [self.action_hint]
+        hints = [self.action_hint, WEBSHOP_ACTION_HINT]
         if self.check_actions:
             hints.append(f"Use this command when needed to inspect valid actions: {self.check_actions}")
         if self.check_inventory:
             hints.append("Use inventory when needed to check carried objects.")
         return "\n".join(hints)
+
+    def _clean_action(self, text: str) -> str:
+        text = (text or "").strip()
+        text = re.sub(r"^```(?:\w+)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+        match = re.search(r"(?:Action\s*:\s*)?((?:click|search)\[[^\r\n\]]+\])", text, re.IGNORECASE)
+        if match:
+            action = match.group(1)
+        else:
+            action = re.sub(r"^\s*Action\s*:\s*", "", text, flags=re.IGNORECASE)
+            action = action.splitlines()[0] if action else "look"
+        return action.strip().strip("`'\" ")
+
+    def _example_prompt_snapshot(self, action: str) -> str:
+        parts = [
+            f"Goal: {self.goal}",
+            f"Observation: {self.current_obs}",
+            f"Retrieved EvoLib entries: {', '.join(self.current_entry_ids) or 'None'}",
+            f"Thought: {self.last_thought}",
+            f"Action: {action}",
+        ]
+        if self.last_raw:
+            parts.append(f"Raw response: {self.last_raw}")
+        return "\n".join(parts)
 
     @classmethod
     def from_config(cls, llm_model: Any, config: Dict[str, Any]):

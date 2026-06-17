@@ -139,26 +139,34 @@ tar -zxvf data.tar.gz
 INSTALL_WEBARENA=false bash ./setup.sh
 ```
 
-Install the plugin into the AgentBoard checkout:
+Install the plugin into the AgentBoard checkout. The installer copies `evolib_agent.py` and patches `agentboard/agents/__init__.py` so AgentBoard can load `EvoLibAgent`:
 
 ```bash
 cd /path/to/evolib_agent_suite
+python scripts/install_into_agentboard.py --agentboard-root /path/to/AgentBoard --dry-run
 python scripts/install_into_agentboard.py --agentboard-root /path/to/AgentBoard
 export EVOLIB_PROJECT_ROOT=/path/to/evolib_agent_suite
 ```
 
-Merge `configs/agentboard_evolib_agent_snippet.yaml` into AgentBoard's eval config, then run AgentBoard normally:
+For the official AgentBoard WebShop task, confirm `data/webshop/test.jsonl` exists, keep `env.webshop.web_url` set to `http://127.0.0.1:3000`, then start the WebShop service:
+
+```bash
+cd /path/to/AgentBoard/agentboard/environment/WebShop
+bash ./run_dev.sh
+```
+
+Merge `configs/agentboard_evolib_agent_snippet.yaml` into AgentBoard's eval config, then run only the official WebShop task:
 
 ```bash
 cd /path/to/AgentBoard
 python agentboard/eval_main.py \
   --cfg-path eval_configs/main_results_all_tasks.yaml \
-  --tasks alfworld,webshop \
+  --tasks webshop \
   --model gpt-3.5-turbo-0613 \
   --log_path ./results/evolib_agentboard
 ```
 
-The AgentBoard plugin finalizes the previous episode at the next `reset()` call, because AgentBoard's public custom-agent interface exposes `reset`, `run`, and `update`, but not a universal terminal callback.
+See the upstream setup notes at https://github.com/hkust-nlp/AgentBoard. The AgentBoard plugin finalizes the previous episode at the next `reset()` call, because AgentBoard's public custom-agent interface exposes `reset`, `run`, and `update`, but not a universal terminal callback.
 
 ## 6. Outputs
 
