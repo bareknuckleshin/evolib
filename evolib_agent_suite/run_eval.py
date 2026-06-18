@@ -17,6 +17,15 @@ from evolib_agent_suite.utils import append_jsonl, ensure_dir, load_config
 
 
 def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
+    """설정 파일 하나로 EvoLib 에이전트 평가 전체 파이프라인을 실행한다.
+
+    Original WebShop 테스트도 이 함수가 공통으로 담당한다. 설정에서
+    `env.backend: original_webshop`을 선택하면 WebShop 어댑터를 만들고, 각
+    session을 `TaskSpec`으로 순회하면서 검색(retrieval) → 행동(action) →
+    추상화(extraction) → 라이브러리 업데이트(update) 순서로 episode를 처리한다.
+    """
+    # 실행 산출물: trajectory는 episode별 상세 로그, metrics는 누적 요약 지표,
+    # library는 EvoLib가 학습/축적한 skill·insight 저장소다.
     out_dir = ensure_dir(config.get("output_dir", "runs/evolib"))
     result_path = out_dir / "trajectories.jsonl"
     metrics_path = out_dir / "metrics.json"
@@ -24,6 +33,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     library_storage_cfg = config.get("library", {}).get("storage", {})
     library_storage_backend = str(library_storage_cfg.get("backend", config.get("library", {}).get("storage_backend", "json")))
 
+    # LLM, 환경, 임베딩 함수는 설정으로 교체 가능하다. Original WebShop 실험에서는
+    # env 설정만 바꾸면 동일한 평가 루프를 그대로 재사용한다.
     llm = build_llm(config.get("llm", {"provider": "heuristic"}))
     env = build_env(config.get("env", {"backend": "mock"}))
     library_cfg = config.get("library", {})
@@ -56,6 +67,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
 
     agent_cfg = config.get("agent", {})
     composition_cfg = _composition_config(agent_cfg.get("composition", {}))
+    # EvoLib ReAct agent는 검색된 library entry를 프롬프트 컨텍스트로 받아서
+    # thought/action을 생성한다. action_hint는 WebShop처럼 문법이 엄격한 환경에서
+    # `search[...]`, `click[...]` 형태를 지키게 하는 중요한 프롬프트 데이터다.
     agent = EvoLibReActAgent(
         llm=llm,
         library=library,
@@ -74,6 +88,9 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     k_insights = int(library_cfg.get("k_insights", 4))
     sample_library = bool(library_cfg.get("sample", True))
     library_cfg = config.get("library", {})
+    # RetrievalConfig는 episode 시작 시 어떤 skill/insight를 가져올지 정하는 핵심
+    # 알고리즘 파라미터다. 유사도 임계값, 후보 풀 크기, weighted/top-k sampling,
+    # temperature/top-p/epsilon 등이 library 탐색과 재사용 방식에 직접 영향을 준다.
     retrieval_config = RetrievalConfig(
         k_skills=int(library_cfg.get("k_skills", 4)),
         k_insights=int(library_cfg.get("k_insights", 4)),
@@ -93,6 +110,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         without_replacement=_as_bool(library_cfg.get("without_replacement", True)),
     )
 
+    # 실행 당시의 retrieval/composition/consolidation/IG 정책을 library에 남긴다.
+    # 나중에 trajectory만 보더라도 어떤 정책으로 생성된 결과인지 재현·비교할 수 있다.
     library.policy_snapshots.append({
         "created_at": time.time(),
         "retrieval_policy": asdict(retrieval_config),
@@ -115,16 +134,22 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
     }
 
     for task in env.iter_tasks(limit=limit or eval_cfg.get("limit"), split=split):
+        # 1) 환경을 session 단위로 초기화하고, WebShop 원본 instruction이 있으면
+        # TaskSpec goal을 최신 값으로 덮어쓴다.
         reset = env.reset(task)
         if reset.goal:
             task.goal = reset.goal
         retrieval_config.context_id = task.task_id
+        # 2) 현재 task/goal/초기 관측을 query로 사용해 관련 skill·insight를 검색한다.
+        # 이 검색 결과가 episode 동안 에이전트 프롬프트의 장기 기억 역할을 한다.
         retrieved = library.retrieve_with_metadata(
             query=f"{task.domain}\n{task.goal}\n{reset.observation}",
             config=retrieval_config,
         )
         entries = [item.entry for item in retrieved]
         agent.reset(task, entries)
+        # 3) composition 단계가 켜져 있으면 검색된 entry들을 조합한 후보 solution을
+        # 만들고, 해당 entry id를 trajectory lineage로 기록한다.
         candidate = agent.candidate_solution
         composed_entry_ids = candidate.entry_ids if candidate else []
         traj = Trajectory(
@@ -145,6 +170,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         obs = reset.observation
         final_out = None
         for t in range(max_steps):
+            # 4) 매 step마다 환경의 available action을 넘긴다. WebShop은 잘못된 문자열
+            # 액션에 민감하므로, 가능한 액션 목록은 LLM의 action 형식 오류를 줄인다.
             available = env.available_actions()
             decision = agent.act(obs, available_actions=available)
             out = env.step(decision.action)
@@ -166,9 +193,12 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
                 break
 
         if final_out is not None:
+            # 5) 환경 reward/progress/success를 trajectory의 최종 성능 지표로 저장한다.
             traj.final_reward = final_out.reward
             traj.success = final_out.success
             traj.progress = final_out.progress
+        # 6) EvoLib 논문식 no-external-feedback 설정에서는 LLM 기반 score estimate를
+        # 사용할 수 있고, 설정에 따라 WebShop reward를 library update에 사용할 수도 있다.
         score_info = extractor.estimate_score(traj, prefer_env_reward=prefer_env_reward)
         score = float(score_info["score"])
         traj.score_estimate = score
@@ -176,6 +206,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         if traj.progress is None:
             traj.progress = score_info.get("progress")
 
+        # 7) 완료된 trajectory에서 재사용 가능한 skill/insight 후보를 추출하고,
+        # 기존 library entry와 유사하면 merge, 새 지식이면 add한다.
         candidates = extractor.extract(traj, score=score)
         new_ids = library.add_or_merge_many(
             candidates,
@@ -183,6 +215,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
             task_id=task.task_id,
             score=score,
         )
+        # 8) Information Gain(IG) 업데이트: episode score와 baseline 차이를 이용해
+        # 이번 episode에서 사용/생성된 entry들의 기여도를 library에 전파한다.
         ig_info = library.update_after_episode(
             retrieved_ids=traj.used_entry_ids,
             new_ids=new_ids,
@@ -198,6 +232,8 @@ def run(config: Dict[str, Any], limit: Optional[int] = None) -> Dict[str, Any]:
         )
         library.save()
 
+        # trajectory JSONL은 디버깅과 후처리의 핵심 데이터다. WebShop 관측/액션뿐 아니라
+        # retrieval 선택 이유, sampling seed, composition 정책, IG credit까지 함께 남긴다.
         record = traj.to_dict()
         record["evolib"] = {            
             "candidate_solution_id": traj.metadata.get("candidate_solution_id"),
